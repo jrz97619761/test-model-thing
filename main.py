@@ -21,8 +21,46 @@ class Decoder(nn.Module):
 
     def __call__(self, x: mx.array): return self.decode(x), mx.sigmoid(self.stop(x))
 
+class IntegratedPaperAdapter(nn.Module):
+    def __init__(self, dim: int, paper_suite: str = 'full'):
+        super().__init__()
+        self.paper_suite = paper_suite
+
+        self.latent = nn.Linear(dim, dim)
+        self.reason = nn.Linear(dim, dim)
+        self.ssm = nn.Linear(dim, dim, bias = False)
+        self.select = nn.Linear(dim, dim)
+        self.diffuse = nn.Linear(dim, dim)
+        self.code = nn.Linear(dim, dim)
+
+    def __call__(self, enc: mx.array, x: mx.array, state: mx.array, dummy: mx.array):
+        if self.paper_suite == 'none':
+            return x
+
+        context = state + enc + dummy
+        latent = self.latent(x)
+        continuous = self.reason(state)
+        selective = self.ssm(context) * mx.sigmoid(self.select(context))
+
+        residual = latent + continuous + selective
+
+        if self.paper_suite in {'latent', 'full'}:
+            x = x + 0.30 * mx.tanh(residual)
+
+        if self.paper_suite in {'mamba', 'full'}:
+            x = x + 0.18 * selective
+
+        if self.paper_suite in {'diffusion', 'full'}:
+            denoised = x + 0.10 * mx.tanh(self.diffuse(x) - x)
+            x = denoised
+
+        if self.paper_suite in {'coder', 'full'}:
+            x = x + 0.08 * mx.tanh(self.code(enc))
+
+        return x
+
 class Layer(nn.Module):
-    def __init__(self, dim: int, spread: int):
+    def __init__(self, dim: int, spread: int, paper_suite: str = 'full'):
         super().__init__()
 
         halflives = mx.exp(mx.linspace(0.0, math.log(float(spread)), dim))
@@ -36,26 +74,32 @@ class Layer(nn.Module):
         self.norm = nn.LayerNorm(dim)
         self.weights = nn.Linear(dim, dim, bias = False)
         self.silu = nn.SiLU()
+        self.adapter = IntegratedPaperAdapter(dim, paper_suite) if paper_suite != 'none' else None
 
         self.freeze(keys = ['states', 'decaytrace', 'embedtrace'], recurse = False)        
 
     def __call__(self, enc: mx.array, x: mx.array, dummy: mx.array):
         decay = mx.sigmoid(self.decay)
         state = (decay * self.states) + enc + dummy
+        hidden = x + self.silu(self.weights(self.norm(state)))
 
-        return x + self.silu(self.weights(self.norm(state))), state, decay
+        if self.adapter is not None:
+            hidden = self.adapter(enc, hidden, state, dummy)
+
+        return hidden, state, decay
 
 class Model(nn.Module):
-    def __init__(self, dim: int, layers: int, spread: int, temp: float, lr: float, lrbegin: int, lrend: int):
+    def __init__(self, dim: int, layers: int, spread: int, temp: float, lr: float, lrbegin: int, lrend: int, paper_suite: str = 'full'):
         super().__init__()
         self.dim = dim
         self.layercount = layers
         self.temp = temp
+        self.paper_suite = paper_suite
 
         self.encoder = Encoder(dim)
         self.decoder = Decoder(dim)
 
-        self.layers = [Layer(dim, spread) for _ in range(layers)]
+        self.layers = [Layer(dim, spread, paper_suite) for _ in range(layers)]
 
         def lrfn(step: mx.array):
             progress = mx.clip(
@@ -155,7 +199,8 @@ class Model(nn.Module):
         self.optimizer.update(self, grads)
         mx.eval(self.parameters(), self.optimizer.state)
 
-        return self.sample(output).item(), stop.item()
+        # Sampling would synchronize the GPU and is not needed during training.
+        return 0, 0.0
 
     def save(self, path: str):
         data = {}
@@ -188,7 +233,10 @@ class Model(nn.Module):
 
     def count(self) -> int:
         per_layer = self.dim * self.dim + 3 * self.dim
-        return 256 * self.dim + self.layercount * per_layer + 256 * self.dim + 256 + self.dim + 1
+        research_penalty = 0
+        if self.paper_suite != 'none':
+            research_penalty = self.layercount * (6 * self.dim * self.dim + 5 * self.dim)
+        return 256 * self.dim + self.layercount * per_layer + 256 * self.dim + 256 + self.dim + 1 + research_penalty
 
 class Runtime:
     def __init__(self, path: str, threshold: float, **kwargs):
@@ -244,6 +292,7 @@ class Runtime:
 
         random.shuffle(files)
 
+        trained = 0
         while True:
             for file in files:
                 with open(file, 'r', encoding = 'utf-8', errors = 'ignore') as f:
@@ -253,7 +302,9 @@ class Runtime:
 
                         for i, (c, n) in enumerate(itertools.pairwise(data)):
                             b, _ = self.call(c, n, i == len(data) - 2, save, frozen)
-                            self.write(b)
+                            trained += 1
+                            if trained % 4096 == 0:
+                                print(f'\rtrained bytes: {trained:,}', end = '', flush = True)
 
     def now(self): return datetime.now().strftime('%d/%m/%Y, %H:%M:%S')
 
@@ -277,10 +328,15 @@ if __name__ == '__main__':
     parser.add_argument('--frozen', action = 'store_true')
     parser.add_argument('--no-save', action = 'store_false')
     parser.add_argument('--dataset', default = 'wikipedia_clean/**/wiki_*')
+    parser.add_argument('--paper-suite', choices = ['none', 'latent', 'mamba', 'diffusion', 'coder', 'full'], default = 'full')
+    parser.add_argument('--cpu', action = 'store_true', help = 'run on CPU instead of the GPU')
+    parser.add_argument('--dim', type = int, default = 768, help = 'model width (default: 768)')
+    parser.add_argument('--layers', type = int, default = 20, help = 'number of recurrent layers (default: 20)')
 
     args = parser.parse_args()
 
-    runtime = Runtime(path = args.path, threshold = 0.35, dim = 512, layers = 16, spread = 64, temp = 0.75, lr = 5e-4, lrbegin = 40000, lrend = 120000)
+    mx.set_default_device(mx.cpu if args.cpu else mx.gpu)
+    runtime = Runtime(path = args.path, threshold = 0.35, dim = args.dim, layers = args.layers, spread = 64, temp = 0.75, lr = 5e-4, lrbegin = 40000, lrend = 120000, paper_suite = args.paper_suite)
     print(f'parameters: {runtime.model.count():,}')
 
     runtime(args.mode, args.dataset, args.no_save, args.frozen)
