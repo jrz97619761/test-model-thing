@@ -17,9 +17,31 @@ This model architecture was designed between July and August 2026 by me (a solo 
 
 Feel free to fork the training and benchmark code (everything is under MIT). I really encourage you to try things out and submit issues and pull requests. If you have compute (e.g. you are a lab or just have GPUs lying around), feel free to train larger models for longer periods of time as well, with credit. I really appreciate contributions to the project.
 
+## Related papers
+
+I’ve added the following references locally in the [`papers/`](./papers/README.md) directory for quick access:
+
+- [DiffusionGemma Technical Report](https://arxiv.org/pdf/2608.00146)
+- [Training Large Language Models to Reason in a Continuous Latent Space](https://arxiv.org/pdf/2412.06769)
+- [Mamba: Linear-Time Sequence Modeling with Selective State Spaces](https://arxiv.org/pdf/2312.00752)
+- [DeepSeek-Coder: When the Large Language Model Meets Programming](https://arxiv.org/pdf/2401.14196v2)
+
+The project now also incorporates the ideas from those papers directly into the model stack. The default run uses a combined paper suite with latent reasoning, selective state-space memory, diffusion-style denoising, and code-oriented conditioning. You can switch the mix with:
+
+```bash
+python main.py my-model.safetensors chat --paper-suite latent
+python main.py my-model.safetensors chat --paper-suite mamba
+python main.py my-model.safetensors chat --paper-suite diffusion
+python main.py my-model.safetensors chat --paper-suite coder
+python main.py my-model.safetensors chat --paper-suite full
+python main.py my-model.safetensors chat --paper-suite none
+```
+
 ## Model output
 
-For reproduction purposes, the dataset I trained my model on is ```simplewiki-20260801-pages-articles.xml.bz2```, from the Wikipedia dumps. The 4.5m model has ```dim = 512``` and ```layers = 16```.
+For reproduction purposes, the dataset I trained my model on is ```simplewiki-20260801-pages-articles.xml.bz2```, from the Wikipedia dumps. The default model is now a larger ```dim = 768```, ```layers = 20``` configuration designed to fit comfortably in an 8 GB RTX 5060 while leaving room for AdamW optimizer state.
+
+On CUDA-capable MLX builds, the entrypoint selects the GPU by default. Use ```--cpu``` only when a GPU is unavailable. The model is intentionally wider and deeper than the original 4.5m-parameter prototype, but the byte-at-a-time recurrent interface still limits kernel occupancy; GPU selection prevents accidental CPU execution, while larger matrix layers provide substantially more work per step.
 
 Below is ```--frozen``` mode output after training a model for 5 minutes (you could train it for much longer, feel free to send in the results as a GitHub issue).
 
@@ -38,6 +60,12 @@ Model weights (in ```.safetensors```) are not provided because GitHub doesn't li
 python main.py <path> train
 python main.py <path> chat
 
+# explicit CPU fallback
+python main.py <path> train --cpu
+
+# customize size if your GPU has more or less memory
+python main.py <path> train --dim 768 --layers 20
+
 # does not save to disk
 python main.py <path> chat --no-save
 
@@ -49,6 +77,9 @@ python main.py <path> chat --no-save --frozen
 
 # benchmark with CoLA
 python benchmark.py <path> <epochs> <slice>
+
+# benchmark on CPU instead
+python benchmark.py <path> <epochs> <slice> --cpu
 ```
 
 You will have to configure your own dataset to run dataset mode, but you should be able to run chat mode without modifying anything if you have weights already.

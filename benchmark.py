@@ -71,7 +71,7 @@ def run(path: str, epochs: int, split: float, data: str):
     if not os.path.exists(path):
         raise FileNotFoundError(f'Model checkpoint not found at {path!r}.')
 
-    model = Model(dim = 512, layers = 16, spread = 64, temp = 0.75, lr = 5e-4, lrbegin = 40000, lrend = 120000)
+    model = Model(dim = 768, layers = 20, spread = 64, temp = 0.75, lr = 5e-4, lrbegin = 40000, lrend = 120000)
     model.load(path)
     model.freeze()
 
@@ -107,6 +107,8 @@ if __name__ == '__main__':
     parser.add_argument('split', type = float)
     
     parser.add_argument('--data', default = 'CoLA/original/raw/in_domain_train.tsv')
+    parser.add_argument('--cpu', action = 'store_true', help = 'run on CPU instead of the GPU')
 
     args = parser.parse_args()
+    mx.set_default_device(mx.cpu if args.cpu else mx.gpu)
     run(args.path, args.epochs, args.split, args.data)
