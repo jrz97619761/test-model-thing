@@ -158,18 +158,22 @@ class Model(nn.Module):
         return self.sample(output).item(), stop.item()
 
     def save(self, path: str):
-        data = {}
-        for k, v in util.tree_flatten(self.parameters()): data[f"m.{k}"] = v
-        for k, v in util.tree_flatten(self.optimizer.state): data[f"o.{k}"] = v
+    data = {}
+    for k, v in util.tree_flatten(self.parameters()): data[f"m.{k}"] = v
+    for k, v in util.tree_flatten(self.optimizer.state): data[f"o.{k}"] = v
 
-        for i, layer in enumerate(self.layers):
-            data[f"state.{i}"] = layer.states
-            data[f"decaytrace.{i}"] = layer.decaytrace
-            data[f"embedtrace.{i}"] = layer.embedtrace
+    for i, layer in enumerate(self.layers):
+        data[f"state.{i}"] = layer.states
+        data[f"decaytrace.{i}"] = layer.decaytrace
+        data[f"embedtrace.{i}"] = layer.embedtrace
 
-        tmp = 'temporary-' + path
-        mx.save_safetensors(tmp, data)
-        os.replace(tmp, path)
+    directory, filename = os.path.split(path)
+    if not filename.endswith('.safetensors'):
+        filename += '.safetensors'
+    tmp = os.path.join(directory, 'temporary-' + filename)
+
+    mx.save_safetensors(tmp, data)
+    os.replace(tmp, path)
 
     def load(self, path: str):
         if not os.path.exists(path): return
