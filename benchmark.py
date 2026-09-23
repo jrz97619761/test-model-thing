@@ -35,7 +35,7 @@ def rollout(model: Model, b_s: bytes):
     model.reset()
 
     for b in b_s: _, _ = model.step(mx.array(b), frozen = True)
-    state = model.layers[-1].states
+    state = model.blocks[-1].states
 
     if state is not None: mx.eval(state)
     return state
@@ -71,7 +71,7 @@ def run(path: str, epochs: int, split: float, data: str):
     if not os.path.exists(path):
         raise FileNotFoundError(f'Model checkpoint not found at {path!r}.')
 
-    model = Model(dim = 512, layers = 16, spread = 32, temp = 0.75, lr = 5e-4, lrbegin = 40000, lrend = 120000)
+    model = Model(dim = 512, layers = 16, spread = 32, temp = 0.75, rate = 5e-4, bound = (40000, 120000))
     model.load(path)
     model.freeze()
 

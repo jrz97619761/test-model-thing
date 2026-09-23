@@ -46,25 +46,23 @@ class Layer(nn.Module):
         return x + self.silu(self.weights(self.norm(state))), state, decay
 
 class Model(nn.Module):
-    def __init__(self, dim: int, layers: int, spread: int, temp: float, lr: float, lrbegin: int, lrend: int):
+    def __init__(self, dim: int, layers: int, spread: int, temp: float, rate: float, bound: tuple[int, int]):
         super().__init__()
         self.dim = dim
-        self.layercount = layers
+        self.layers = layers
         self.temp = temp
 
         self.encoder = Encoder(dim)
         self.decoder = Decoder(dim)
 
-        self.layers = [Layer(dim, spread) for _ in range(layers)]
+        self.blocks = [Layer(dim, spread) for _ in range(layers)]
 
         def lrfn(step: mx.array):
-            progress = mx.clip(
-                (step.astype(mx.float32) + 1.0 - float(lrbegin)) / float(lrend - lrbegin),
-                0.0, 1.0
-            )
-            return lr * (1.0 - 0.9 * progress)
+            progress = mx.clip((step.astype(mx.float32) + 1.0 - float(bound[0])) / float(bound[1] - bound[0]), 0.0, 1.0)
+            return rate * (1.0 - 0.9 * progress)
 
         self.optimizer = opt.AdamW(learning_rate = lrfn)
+        self.compiled = None
 
     def sample(self, output: mx.array):
         probs = mx.softmax(output)
@@ -73,26 +71,15 @@ class Model(nn.Module):
         temp = mx.maximum(0.1, self.temp * (1.0 - self.temp * entropy)).item()
         return mx.random.categorical(output / temp)
 
-    def evaluate(self): mx.eval(*[layer.states for layer in self.layers])
-
-    def reset(self):
-        for layer in self.layers:
-            layer.states = mx.zeros((self.dim, ))
-
-            layer.decaytrace = mx.zeros((self.dim, ))
-            layer.embedtrace = mx.zeros((256, self.dim))
-
-        self.evaluate()
-
     def step(self, c: mx.array, dummies: mx.array | None = None, frozen: bool = False):
-        if dummies is None: dummies = [mx.zeros((self.dim, )) for _ in range(self.layercount)]
+        if dummies is None: dummies = [mx.zeros((self.dim, )) for _ in range(self.layers)]
 
         enc = self.encoder(c)
         x = enc
             
         states, decays = [], []
 
-        for i, layer in enumerate(self.layers):
+        for i, layer in enumerate(self.blocks):
             x, state, decay = layer(enc, x, dummies[i])
             if frozen: layer.states = mx.stop_gradient(state)
 
@@ -101,13 +88,29 @@ class Model(nn.Module):
 
         return (x, states, decays), self.decoder(x)
 
+    def updategrads(self, grads):
+        if self.compiled is None:
+            self.optimizer.update(self, grads)
+            mx.eval(self.parameters(), self.optimizer.state)
+            state = [self.state, self.optimizer.state]
+
+            def update(gradients):
+                self.optimizer.update(self, gradients)
+                return self.optimizer.state["step"]
+
+            self.compiled = mx.compile(update, inputs = state, outputs = state)
+
+        else:
+            self.compiled(grads)
+            mx.eval(self.parameters(), self.optimizer.state)
+
     def __call__(self, currb: int, nextb: int | None, end: bool, frozen: bool):
         c = mx.array(currb)
 
         if frozen:
             _, (output, stop) = self.step(c, frozen = True)
 
-            self.evaluate()
+            mx.eval(*[layer.states for layer in self.blocks])
             return self.sample(output).item(), stop.item()
 
         p = self.trainable_parameters()
@@ -132,37 +135,50 @@ class Model(nn.Module):
 
         (_, (states, decays, output, stop)), (grads, dlds_s) = mx.value_and_grad(
             fwd, argnums = (0, 1)
-        )(p, [mx.zeros((self.dim, )) for _ in range(self.layercount)])
+        )(p, [mx.zeros((self.dim, )) for _ in range(self.layers)])
 
         self.update(p)
 
-        for i, layer in enumerate(self.layers):
+        c_range = (mx.arange(256) == c)[:, None].astype(mx.float32)
+        for i, layer in enumerate(self.blocks):
             dlds = dlds_s[i]
 
-            embedtrace = (layer.embedtrace * decays[i]) + (mx.arange(256) == c)[:, None].astype(mx.float32)
-            grads["encoder"]["embed"]["weight"] += dlds * (layer.embedtrace * decays[i])
+            decay_embedtrace = layer.embedtrace * decays[i]
+            embedtrace = decay_embedtrace + c_range
+            grads["encoder"]["embed"]["weight"] += dlds * decay_embedtrace
             
             decaytrace = (decays[i] * layer.decaytrace) + (decays[i] * (1.0 - decays[i]) * layer.states)
-            grads["layers"][i]["decay"] = dlds * decaytrace
+            grads["blocks"][i]["decay"] = dlds * decaytrace
 
             layer.states = mx.stop_gradient(states[i])
 
             layer.decaytrace = mx.stop_gradient(decaytrace)
             layer.embedtrace = mx.stop_gradient(embedtrace)
+
+        mx.eval(*[
+            value
+            for layer in self.blocks
+            for value in (layer.states, layer.decaytrace, layer.embedtrace)
+        ])
             
-            mx.eval(layer.states, layer.decaytrace, layer.embedtrace)
-
-        self.optimizer.update(self, grads)
-        mx.eval(self.parameters(), self.optimizer.state)
-
+        self.updategrads(grads)
         return self.sample(output).item(), stop.item()
+
+    def reset(self):
+        for layer in self.blocks:
+            layer.states = mx.zeros((self.dim, ))
+
+            layer.decaytrace = mx.zeros((self.dim, ))
+            layer.embedtrace = mx.zeros((256, self.dim))
+
+        mx.eval(*[layer.states for layer in self.blocks])
 
     def save(self, path: str):
         data = {}
         for k, v in util.tree_flatten(self.parameters()): data[f"m.{k}"] = v
         for k, v in util.tree_flatten(self.optimizer.state): data[f"o.{k}"] = v
 
-        for i, layer in enumerate(self.layers):
+        for i, layer in enumerate(self.blocks):
             data[f"state.{i}"] = layer.states
             data[f"decaytrace.{i}"] = layer.decaytrace
             data[f"embedtrace.{i}"] = layer.embedtrace
@@ -173,22 +189,23 @@ class Model(nn.Module):
 
     def load(self, path: str):
         if not os.path.exists(path): return
+        self.compiled = None
 
         data, model, opts = mx.load(path), {}, {}
         
         for k, v in data.items():
             if k.startswith("m."): model[k[2:]] = v
             elif k.startswith("o."): opts[k[2:]] = v
-            elif k.startswith("state."): self.layers[int(k.split('.')[1])].states = v
-            elif k.startswith("decaytrace."): self.layers[int(k.split('.')[1])].decaytrace = v
-            elif k.startswith("embedtrace."): self.layers[int(k.split('.')[1])].embedtrace = v
+            elif k.startswith("state."): self.blocks[int(k.split('.')[1])].states = v
+            elif k.startswith("decaytrace."): self.blocks[int(k.split('.')[1])].decaytrace = v
+            elif k.startswith("embedtrace."): self.blocks[int(k.split('.')[1])].embedtrace = v
             
         if model: self.update(util.tree_unflatten(list(model.items())))
         if opts: self.optimizer.state = util.tree_unflatten(list(opts.items()))
 
     def count(self) -> int:
         per_layer = self.dim * self.dim + 3 * self.dim
-        return 256 * self.dim + self.layercount * per_layer + 256 * self.dim + 256 + self.dim + 1
+        return 256 * self.dim + self.layers * per_layer + 256 * self.dim + 256 + self.dim + 1
 
 class Runtime:
     def __init__(self, path: str, threshold: float, **kwargs):
@@ -197,7 +214,6 @@ class Runtime:
         self.threshold = threshold
 
         self.step = 0
-        self.prevtime = None
 
     def save(self):
         self.step += 1
@@ -214,9 +230,11 @@ class Runtime:
         sys.stdout.flush()
 
     def chat(self, save: bool, frozen: bool):
+        timestamp = None
+
         while True:
-            text = input(f'\n[{self.now()} | {0 if self.prevtime is None else time.time() - self.prevtime:.4f}s]\nUser >> ')
-            self.prevtime = time.time()
+            text = input(f'\n[{self.now()} | {0 if timestamp is None else time.time() - timestamp:.4f}s]\nUser >> ')
+            timestamp = time.time()
 
             data = (text + '\n').encode('utf-8')
             
@@ -259,7 +277,7 @@ class Runtime:
 
     def __call__(self, mode: str, dataset: str, save: bool, frozen: bool):
         self.model.load(self.path)
-        print()
+        print(f'parameters: {self.model.count():,}\n')
 
         try:
             match mode:
@@ -280,7 +298,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    runtime = Runtime(path = args.path, threshold = 0.35, dim = 512, layers = 16, spread = 32, temp = 0.75, lr = 5e-4, lrbegin = 40000, lrend = 120000)
-    print(f'parameters: {runtime.model.count():,}')
-
-    runtime(args.mode, args.dataset, args.no_save, args.frozen)
+    Runtime(
+        path = args.path, threshold = 0.35,
+        dim = 512, layers = 16, spread = 32, temp = 0.75,
+        rate = 5e-4, bound = (40000, 120000)
+    )(args.mode, args.dataset, args.no_save, args.frozen)
