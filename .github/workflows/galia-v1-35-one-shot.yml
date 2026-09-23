@@ -1,0 +1,74 @@
+name: GALIA v1.35 one-shot integration
+
+on:
+  push:
+    branches:
+      - galia-v1-35-integration
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: galia-v1-35-integration
+          fetch-depth: 1
+
+      - name: Extract and verify promoted v1.35 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, subprocess, zipfile
+
+          operator = Path("payload/TMT_GALIA_V1_34_MAC_OPERATOR_REVN.zip")
+          operator_sha = hashlib.sha256(operator.read_bytes()).hexdigest()
+          assert operator_sha == "07c7ef5d59dcafe8e9ebb32c9b0938ae063e8377b2977907895195ab2e31db46", operator_sha
+
+          base_blob = subprocess.check_output(["git", "hash-object", "main.py"], text=True).strip()
+          assert base_blob == "7e3bea395b37cb5691015301a05e3ddfe48ae045", base_blob
+
+          with zipfile.ZipFile(operator) as z:
+              envelope = z.read(
+                  "TMT_GALIA_V1_34_MAC_OPERATOR_REVN/"
+                  "TMT_GALIA_V1_34_EXECUTION_ENVELOPE_REVI.zip"
+              )
+          Path("/tmp/envelope.zip").write_bytes(envelope)
+
+          with zipfile.ZipFile("/tmp/envelope.zip") as z:
+              qa2 = z.read(
+                  "TMT_GALIA_V1_34_EXECUTION_ENVELOPE_REVI/artifacts/"
+                  "TMT_GALIA_REBASE_v1_35_QA2.zip"
+              )
+          Path("/tmp/qa2.zip").write_bytes(qa2)
+
+          with zipfile.ZipFile("/tmp/qa2.zip") as z:
+              source = z.read(
+                  "TMT_GALIA_REBASE_v1_35_QA2/"
+                  "main_TMT_GALIA_v1_35_candidate.py"
+              )
+
+          candidate_sha = hashlib.sha256(source).hexdigest()
+          assert candidate_sha == "e98f2403d9173e39df3e25cfb291ed5c348f8edfbe565a08c6c02c2b7ae63c16", candidate_sha
+          Path("main.py").write_bytes(source)
+          print("GALIA_V1_35_SOURCE_SHA256=" + candidate_sha)
+          print("GALIA_V1_35_SOURCE_EXTRACTION=PASS")
+          PY
+
+      - name: Commit promoted source and self-clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum main.py | awk '{print $1}')" = "e98f2403d9173e39df3e25cfb291ed5c348f8edfbe565a08c6c02c2b7ae63c16"
+          git config user.name "galia-integration-bot"
+          git config user.email "galia-integration-bot@users.noreply.github.com"
+          git rm payload/TMT_GALIA_V1_34_MAC_OPERATOR_REVN.zip
+          git rm .github/workflows/galia-v1-35-one-shot.yml
+          git add main.py
+          git commit -m "Integrate GALIA v1.35 checkpoint hardening"
+          git push origin HEAD:galia-v1-35-integration
