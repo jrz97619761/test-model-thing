@@ -6,6 +6,7 @@ import mlx.nn as nn
 import mlx.optimizers as opt
 import mlx.utils as util
 
+# Model inputs and outputs are raw byte values in the range 0-255.
 class Encoder(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
