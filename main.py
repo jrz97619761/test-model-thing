@@ -178,11 +178,6 @@ class Model(nn.Module):
         for k, v in util.tree_flatten(self.parameters()): data[f"m.{k}"] = v
         for k, v in util.tree_flatten(self.optimizer.state): data[f"o.{k}"] = v
 
-        for i, layer in enumerate(self.blocks):
-            data[f"state.{i}"] = layer.states
-            data[f"decaytrace.{i}"] = layer.decaytrace
-            data[f"embedtrace.{i}"] = layer.embedtrace
-
         tmp = 'temporary-' + path
         mx.save_safetensors(tmp, data)
         os.replace(tmp, path)
@@ -196,9 +191,6 @@ class Model(nn.Module):
         for k, v in data.items():
             if k.startswith("m."): model[k[2:]] = v
             elif k.startswith("o."): opts[k[2:]] = v
-            elif k.startswith("state."): self.blocks[int(k.split('.')[1])].states = v
-            elif k.startswith("decaytrace."): self.blocks[int(k.split('.')[1])].decaytrace = v
-            elif k.startswith("embedtrace."): self.blocks[int(k.split('.')[1])].embedtrace = v
             
         if model: self.update(util.tree_unflatten(list(model.items())))
         if opts: self.optimizer.state = util.tree_unflatten(list(opts.items()))
