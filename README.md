@@ -60,6 +60,8 @@ Once it begins training, you can safely ^C the program and it will save weights.
 
 ## A graphical view (partially outdated)
 
+_I'm probably going to redo this in Manim or similar software sometime soon. Expect this part to change significantly soon_
+
 Below is an approximate flow chart of the model architecture, made in Apple's Freeform app (excluding the wrapper for dataset cleaning and input/output handling) for reference. Note that the arrow connecting the target latent to the CE loss should instead be the target byte to the CE loss.
 
 <img width="1653" height="1161" alt="JEPA thing" src="https://github.com/user-attachments/assets/2d3a34ff-ba6a-44b8-b361-6c73da9216c0" />
