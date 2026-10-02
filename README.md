@@ -38,6 +38,9 @@ Model weights (in ```.safetensors```) are not provided because GitHub doesn't li
 python main.py <path> train
 python main.py <path> chat
 
+# only use crossentropy loss
+python main.py <path> chat --ce-only
+
 # does not save to disk
 python main.py <path> chat --no-save
 
