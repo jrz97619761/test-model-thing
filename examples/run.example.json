@@ -24,7 +24,7 @@
   "initial_optimizer_step": 0,
   "started_at": null,
   "sample": null,
+  "last_checkpoint": null,
   "evaluation": null,
-  "status": "running",
-  "last_checkpoint": null
+  "status": "running"
 }

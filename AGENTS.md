@@ -13,6 +13,7 @@ Treat model quality claims as experimental results. Small fixtures verify behavi
 - Check `git status --short`. Preserve changes that belong to the user.
 - Trace inputs, model state, outputs, and failure paths before a fix.
 - Keep changes small. Follow local code style without unrelated changes.
+- Keep related JSON keys adjacent, and preserve their order when you edit examples.
 - Read directly relevant installed skills before use. Use any skill that the user names.
 - Use primary sources for current or niche technical claims. Use Context7 for library documentation when available.
 - State when a required tool or skill is unavailable. Do not claim checks that you did not perform.
