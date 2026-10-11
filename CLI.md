@@ -42,19 +42,21 @@ Help and version require no MLX import.
 
 ## Package and workspace
 
-The package files are `src/tmt/{__init__.py,__main__.py,cli.py,main.py,benchmark.py}`.
-`main.py` owns model arithmetic and constructor defaults. `cli.py` owns commands and the strict checkpoint loader.
+The package files are `src/tmt/{__init__.py,__main__.py,blocks.py,cli.py,main.py,benchmark.py}`.
+`main.py` owns model arithmetic and constructor defaults. `blocks.py` owns byte-step blocks and their factory table.
+`cli.py` owns commands and the strict checkpoint loader.
 `benchmark.py` owns frozen byte scores and the CoLA classifier head. Tests stay in `test/`.
 
-The tracked examples are [model.json](examples/model.json), [tiny-model.json](examples/tiny-model.json), and [grid.json](examples/grid.json).
+The tracked examples are [model.json](examples/model.json), [tiny-model.json](examples/tiny-model.json), [grid.json](examples/grid.json), and [run.example.json](examples/run.example.json).
 Installed commands do not need checkout examples.
 
 
 All relative paths use the current folder. TMT does not search parent folders.
 Bare `tmt init` creates `model.json`, `grid.json`, `run.example.json`, `data/train/`, `data/dev/`, and `runs/`.
-`model.json` contains every constructor default. A user JSON can override a subset of these values.
+`model.json` contains every constructor default, with `"block": "rtu"`.
+A user JSON can override a subset of these values.
 
-The workspace grid uses dimensions 4 and 8, one layer, spread 4, and seeds 11 and 22.
+The workspace grid uses dimensions 4 and 8, one layer, spread 4, block `rtu`, and seeds 11 and 22.
 
 `run.example.json` is a template, not a run record. Its null timestamp is a placeholder.
 
@@ -66,7 +68,7 @@ Use a new workspace folder. These commands select a tiny model and raw-byte inpu
 
 ```bash
 tmt init
-printf '{"dim":4,"layers":1,"spread":4}\n' > model.json
+printf '{"dim":4,"layers":1,"spread":4,"block":"rtu"}\n' > model.json
 printf abcd > data/train/tiny.bin
 printf wxyz > data/dev/tiny.bin
 tmt train --data 'data/train/*' --run first --updates 3
@@ -79,6 +81,7 @@ tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --ou
 
 Train and sweep default to `model.json`. An explicit `--config PATH` overrides it for a fresh run.
 The CLI checks config types and limits before model creation. The [command manual](src/tmt/commands.md) lists these limits.
+
 All CLI seeds and sweep grid seeds must be integers from `0` to `18446744073709551615`, inclusive.
 Evaluation and sweep require a positive `--max-bytes` value. Zero and negative values cause an input error.
 
@@ -91,7 +94,8 @@ For an explicit path, use `tmt train other/model.safetensors --data 'data/train/
 A positional checkpoint excludes `--run`. Resume requires that positional checkpoint and forbids `--config` and `--run`.
 
 Resume restores model and optimizer tensors, then adds the requested updates with a new data pass.
-It resets internal state and RTU traces at the first document. It does not restore the file cursor or RNG state.
+It resets block state and temporal traces at the first document. It does not restore the file cursor or RNG state.
+The checkpoint config must include `block`. Checkpoints from before this field are unsupported.
 
 The trainer writes `manifest/run.json` beside the checkpoint at start and exit.
 The record contains model `config`, invocation `seed`, UTC `started_at`, `status`, and `last_checkpoint`.
@@ -113,6 +117,10 @@ The objective is `tmt` for the full loss or `ce_only` for next-byte cross entrop
 The file list includes all matched paths. The update budget can stop a pass before the trainer reads every file.
 Paths identify the file selection but do not prove that file contents stay the same.
 
+The record also contains `trainable_parameters` and `temporal_gradient`.
+`trainable_parameters` counts trainable tensor elements before a full-model freeze.
+`temporal_gradient` lists the gradient rule label for each block in layer order.
+
 `resume` identifies a resume invocation. `initial_optimizer_step` is the saved optimizer step at resume start, or zero for a fresh run.
 `updates` is the budget for this invocation, with additional updates on resume.
 
@@ -129,6 +137,7 @@ Use `--sample-every N` to write a sample after each N completed updates.
 The command writes no samples by default.
 Set `--sample-prompt`, `--sample-seed`, and `--sample-bytes` to change the prompt, seed, and output length.
 The defaults are `The `, `11`, and `256` bytes. The byte count must be positive.
+
 Sample prompts must be nonempty. The CLI checks sample values and evaluation byte budgets even when samples or interval evaluation are off.
 
 The command prints an escaped preview and writes raw sample bytes under `samples/<UTC timestamp>/`.
@@ -144,7 +153,7 @@ The default evaluation byte budget is `8192` bytes. Set `--eval-max-bytes N` to 
 
 The command evaluates at each interval and after successful completion if the last update was outside the interval.
 It writes score rows to `manifest/evaluation.jsonl`. Each row includes `completed_updates`, `optimizer_step`, and the normal evaluation score fields.
-Evaluation uses frozen model weights and restores recurrent state and RTU traces.
+Evaluation uses frozen model weights and restores block state and temporal traces.
 Each invocation replaces `evaluation.jsonl`.
 The command clears this file at each invocation, even when interval evaluation is off.
 
@@ -155,12 +164,12 @@ Ctrl-C does not save. Keep the last successful checkpoint. Direct writes can lea
 
 Each file in a quoted glob is one raw-byte document. TMT adds no separators and does not decode input.
 The trainer shuffles sorted file paths once per invocation. Each adjacent byte pair gives one optimizer update.
-The trainer resets internal state and RTU traces at each document. Empty files give no updates.
+The trainer resets block state and temporal traces at each document. Empty files give no updates.
 
 The default objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss.
 `--ce-only` selects next-byte cross entropy alone.
 
-Evaluation uses frozen weights, no samples, and the first byte as context. It restores internal state and RTU traces after success or failure.
+Evaluation uses frozen weights, no samples, and the first byte as context. It restores block state and temporal traces after success or failure.
 The default input budget is 8192 bytes across sorted files. Each context window counts input bytes before the target.
 
 Sweep requires a new or empty output folder. It rejects a nonempty folder without changes.
@@ -173,13 +182,87 @@ Train sample and evaluation options apply to each candidate.
 
 The development score at the end of a sweep remains separate.
 
+## Blocks and temporal gradients
+
+The `block` config field selects one factory for every model layer.
+The package registers only `rtu`. Its temporal-gradient label is `rtu-v1`.
+The model records one label per layer in `temporal_gradient`.
+
+The Python method `Model.step()` returns `((x, state_results, auxiliary_results), (logits, stop))`.
+`state_results` contains one dictionary per block. Each dictionary uses that block's `state_fields` names.
+`auxiliary_results` contains one block-specific value per block.
+The command-line interface does not expose this internal result structure.
+
+Each block takes an encoded byte, the prior layer output, and a probe.
+It returns the next output, candidate state, and auxiliary data for its gradient rule.
+The next output has shape `[dim]`. State fields can use other fixed shapes.
+
+Blocks list byte state in `state_fields` and temporal history in `trace_fields`.
+They create all fields before optimizer setup. They freeze runtime fields and keep trainable weights as MLX parameters.
+The forward call reads prior state and returns candidate state.
+The call does not change persistent fields.
+The model commits state after differentiation, or after a frozen step.
+
+The base block provides `reset()`, `probe()`, `adjust_gradients()`, `features()`, and state helpers.
+The helper names are `snapshot_state()`, `restore_state()`, `commit_state()`, and `eval_state()`.
+`Model` applies `snapshot_state()`, `restore_state()`, and `eval_state()` across its blocks.
+It calls each block's `commit_state()` for candidate state and trace values.
+
+Evaluation and samples restore snapshots after success or failure.
+Frozen steps advance state only. They leave traces, weights, and optimizer state unchanged.
+
+The default temporal rule uses autodiff within one byte step.
+It does not pass gradients through detached byte history.
+The RTU hook adds the current recurrent trace contributions to the encoder and block gradients.
+The hook label is `rtu-v1`.
+
+The CoLA probe uses the final block feature vector.
+RTU uses its recurrent state, with feature convention `recurrent-state`.
+Other blocks use the final output, with feature convention `final-output`.
+The benchmark result records `feature_convention` because different features can change CoLA MCC.
+
+`block` is part of resolved model config and checkpoint metadata.
+The loader requires complete metadata with this selector.
+Earlier checkpoints without `block` fail validation, even when their version marker is `1`.
+Create new checkpoint artifacts with this release.
+
+## Local block comparison
+
+The package ships only the RTU factory. Add a research block to `src/tmt/blocks.py` and register it in `BLOCKS`.
+Keep the block name fixed for the whole experiment. Save the code revision with each result.
+Use a local block name such as `candidate-v1` only after you add that factory.
+
+Use one base config for both blocks. Keep the data, objective, optimizer settings, update budget, and seed list fixed.
+Add each block and seed to a sweep grid to create paired runs.
+
+```json
+{
+  "block": ["rtu", "candidate-v1"],
+  "seed": [11, 22, 33]
+}
+```
+
+```bash
+tmt sweep --config research.json --grid ab-grid.json \
+  --data 'data/train/*' --development 'data/dev/*' \
+  --output runs/ab-001 --updates 1000
+```
+
+Group result rows by seed and compare every paired score.
+A shared seed repeats the random-number start. It does not guarantee equal initial values for differently shaped blocks.
+Equal updates also do not mean equal parameter count, compute, or state memory.
+Compare `trainable_parameters` and `temporal_gradient` with BPB.
+Use untouched test documents for a final comparison.
+
 The byte-only benchmark always uses 393 input bytes, 390 targets, and 104 common targets with windows 1, 8, 32, and 128.
 For optional CoLA, use `tmt benchmark runs/first/model.safetensors --cola-data cola.tsv --epochs 1 --split 0.5`.
 When you set `--cola-data`, `--epochs` must be a positive integer.
 Each nonblank CoLA row must have exactly four columns, a binary label, and a nonblank sentence. Invalid rows produce a row-numbered error before model load or byte evaluation. The loader ignores blank lines and preserves sentence whitespace.
+
 `python -m tmt.benchmark` accepts the same benchmark options.
 CoLA uses four-column TSV rows, a contiguous split, and head-only updates. It reports MCC times 100.
 Each label must be `0` or `1`. An invalid label causes an error with its TSV row number before model load or byte evaluation.
+The benchmark reports `feature_convention` with CoLA scores.
 
 Generation encodes its nonempty prompt as UTF-8 and writes raw bytes without the prompt.
 It prints byte progress at each `--log-every` interval. The default interval is `1000` bytes.
@@ -198,5 +281,6 @@ File errors and invalid values print a short error to stderr and exit with code 
 Train checks train and evaluation selections before it creates a named or timestamp run folder.
 Sweep checks train, evaluation, and development selections before output creation.
 Unmatched globs and unreadable files cause an input error. Correct the input and retry with the same output path.
+
 After sweep execution starts, `sweep.json` records status, progress, and any failure or interrupt error.
 For a retry after an execution failure, use a new sweep output path. The command preserves partial results and checkpoints.

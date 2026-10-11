@@ -13,7 +13,8 @@ import pytest
 
 MANIFEST_FIELDS = {'config', 'seed', 'data_glob', 'data_files', 'updates', 'log_every', 'objective',
                    'completed_updates', 'resume', 'initial_optimizer_step',
-                   'started_at', 'status', 'last_checkpoint', 'sample', 'evaluation'}
+                   'started_at', 'status', 'last_checkpoint', 'sample', 'evaluation',
+                   'trainable_parameters', 'temporal_gradient'}
 
 
 def test_version():
@@ -101,7 +102,7 @@ def test_installed_workflow():
             return result.stdout
         assert '## init' in run('help', 'init')
         run('init')
-        (root / 'model.json').write_text('{"dim":4,"layers":1,"spread":4}')
+        (root / 'model.json').write_text('{"dim":4,"layers":1,"spread":4,"block":"rtu"}')
         (root / 'data/train/tiny.bin').write_bytes(b'abcd')
         (root / 'data/dev/tiny.bin').write_bytes(b'wxyz')
         progress = run('train', '--data', 'data/train/*', '--run', 'first', '--updates', '3', '--log-every', '2',
@@ -123,6 +124,7 @@ def test_installed_workflow():
         fresh = json.loads(manifest.read_text())
         assert (fresh['data_glob'], fresh['data_files'], fresh['updates'], fresh['completed_updates']) == ('data/train/*', [str((root / 'data/train/tiny.bin').resolve())], 3, 3)
         assert (fresh['objective'], fresh['resume'], fresh['initial_optimizer_step']) == ('tmt', False, 0)
+        assert (fresh['trainable_parameters'], fresh['temporal_gradient']) == (model.count(), model.temporal_gradient)
         (root / 'data/resume').mkdir()
         (root / 'data/resume/next.bin').write_bytes(b'wxyz')
         run('train', str(checkpoint), '--data', 'data/resume/*', '--resume', '--updates', '2', '--seed', '99', '--ce-only')
@@ -130,6 +132,7 @@ def test_installed_workflow():
         record = json.loads(manifest.read_text())
         assert set(record) == MANIFEST_FIELDS
         assert (record['status'], record['config'], record['last_checkpoint']) == ('complete', settings, str(checkpoint.resolve()))
+        assert (record['trainable_parameters'], record['temporal_gradient']) == (model.count(), model.temporal_gradient)
         assert (record['data_glob'], record['data_files'], record['updates'], record['completed_updates']) == ('data/resume/*', [str((root / 'data/resume/next.bin').resolve())], 2, 2)
         assert (record['seed'], record['objective'], record['resume'], record['initial_optimizer_step']) == (99, 'ce_only', True, 3)
         run('evaluate', str(checkpoint), '--data', 'data/train/*', '--windows', '1', '2', '--output', 'score.json')
@@ -250,15 +253,20 @@ def test_installed_failure_paths(subtests):
         assert 'not empty' in result.stderr
         assert before == {p: p.read_bytes() for p in (root / 'sweep').rglob('*') if p.is_file()}
         checkpoint = root / 'sweep/run-0001/model.safetensors'
-        for contents in ('{', '[]', '{"unknown": 1}', '{"bound": 30}', '{"dim": true}', '{"rate": 0}'):
+        for contents in ('{', '[]', '{"unknown": 1}', '{"bound": 30}', '{"dim": true}', '{"rate": 0}',
+                         '{"block": "unknown-block"}'):
             (root / 'bad.json').write_text(contents)
-            run('train', '--data', 'train.bin', '--config', 'bad.json', '--run', 'bad')
+            result = run('train', '--data', 'train.bin', '--config', 'bad.json', '--run', 'bad')
+            if 'unknown-block' in contents:
+                assert 'model config.block must be one of' in result.stderr
             assert not (root / 'runs/bad').exists()
-        (root / 'bad-grid.json').write_text('{"bound": [30]}')
-        result = run('sweep', '--grid', 'bad-grid.json', '--data', 'train.bin',
-                     '--development', 'dev.bin', '--output', 'bad-sweep')
-        assert 'model config.bound must be two integers' in result.stderr
-        assert not (root / 'bad-sweep').exists()
+        for grid, message in (({'bound': [30]}, 'model config.bound must be two integers'),
+                              ({'block': ['unknown-block']}, 'model config.block must be one of')):
+            (root / 'bad-grid.json').write_text(json.dumps(grid))
+            result = run('sweep', '--grid', 'bad-grid.json', '--data', 'train.bin',
+                         '--development', 'dev.bin', '--output', 'bad-sweep')
+            assert message in result.stderr
+            assert not (root / 'bad-sweep').exists()
         result = run('evaluate', str(checkpoint), '--data', 'dev.bin', '--max-bytes', '2',
                      '--output', 'score.json', success=True)
         score = json.loads((root / 'score.json').read_text())
@@ -356,8 +364,9 @@ def test_init():
         templates = {Path(directory) / name for name in ('model.json', 'grid.json', 'run.example.json')}
         assert set(Path(directory).rglob('*.json')) == templates
         assert all((Path(name).is_dir() for name in ('data/train', 'data/dev', 'runs')))
-        assert json.loads(Path('grid.json').read_text()) == {'dim': [4, 8], 'layers': [1], 'spread': [4], 'seed': [11, 22]}
+        assert json.loads(Path('grid.json').read_text()) == {'dim': [4, 8], 'layers': [1], 'spread': [4], 'block': ['rtu'], 'seed': [11, 22]}
         template = json.loads(Path('run.example.json').read_text())
+        assert template == json.loads((repo / 'examples' / 'run.example.json').read_text())
         assert set(template) == MANIFEST_FIELDS
         assert (template['config'], template['seed'], template['data_glob'], template['data_files']) == (saved, 11, 'data/train/*', [])
         assert (template['updates'], template['objective'], template['completed_updates']) == (1000, 'tmt', 0)
@@ -371,7 +380,9 @@ def test_init():
     assert load_config(repo / 'examples' / 'model.json') == load_config()
     tiny = load_config(repo / 'examples' / 'tiny-model.json')
     assert (tiny['dim'], tiny['layers'], tiny['spread']) == (4, 1, 4)
-    assert json.loads((repo / 'examples' / 'grid.json').read_text()) == {'dim': [4, 8], 'seed': [11, 22]}
+    assert json.loads((repo / 'examples' / 'grid.json').read_text()) == {
+        'block': ['rtu'], 'dim': [4, 8], 'layers': [1], 'spread': [4], 'seed': [11, 22],
+    }
 
 
 def test_init_preserves_files():
@@ -410,6 +421,7 @@ def test_config():
 
 def test_invalid_config_values(subtests):
     from tmt.cli import _validate_metadata, load_config, new_model
+    from tmt.main import Model
 
     cases = []
     for name in ('dim', 'layers', 'spread'):
@@ -418,6 +430,7 @@ def test_invalid_config_values(subtests):
         cases.extend((name, value) for value in (True, -1, '1', None, [], {},
                                                float('nan'), float('inf'), -float('inf'), 10 ** 400))
     cases.append(('rate', 0))
+    cases.append(('block', 'unknown-block'))
     cases.extend(('bound', value) for value in (30, None, '0,1', {}, [], [0], [0, 1, 2],
                                                [-1, 1], [1, 1], [2, 1], [False, 1], [0, 1.0]))
     with tempfile.TemporaryDirectory() as directory:
@@ -433,6 +446,8 @@ def test_invalid_config_values(subtests):
                 raw = json.dumps({'version': 1, 'model': settings})
                 with pytest.raises(ValueError, match=f'checkpoint.model.{name}'):
                     _validate_metadata(raw)
+        with pytest.raises(ValueError, match='unknown block'):
+            Model(dim=4, layers=1, spread=4, block='unknown-block')
         path.write_text('{"dim": 1, "layers": 1, "spread": 1, "temp": 0, "rate": 1, "bound": [0, 1]}')
         settings = load_config(path)
         assert (settings['temp'], settings['rate'], settings['bound']) == (0, 1, [0, 1])
@@ -461,7 +476,7 @@ def test_evaluation_byte_limits(subtests):
 
 def _tiny_settings():
     return {'dim': 4, 'layers': 1, 'spread': 4, 'temp': 0.75,
-            'rate': 0.0005, 'bound': [40000, 120000]}
+            'rate': 0.0005, 'bound': [40000, 120000], 'block': 'rtu'}
 
 
 def test_train():
@@ -547,10 +562,13 @@ def test_manifest(subtests):
             records.clear()
             with (patch('tmt.cli.json.dump', side_effect=capture) as writes,
                   patch.object(Model, 'train_step', record_train)):
-                train(_tiny_settings(), checkpoint, 'data/*.bin', 4, 11, ce_only)
+                trained = train(_tiny_settings(), checkpoint, 'data/*.bin', 4, 11, ce_only)
 
             assert writes.call_count == 2
             assert set(records[0]) == MANIFEST_FIELDS
+            assert (records[0]['trainable_parameters'], records[0]['temporal_gradient']) == (
+                trained.count(), trained.temporal_gradient
+            )
             for record in records:
                 assert (record['config'], record['seed'], record['data_glob']) == (_tiny_settings(), 11, 'data/*.bin')
                 assert set(record['data_files']) == set(paths.values())
@@ -656,24 +674,75 @@ def test_train_loss_intervals(subtests, assert_almost_equal):
 
 def test_evaluate(assert_almost_equal):
     import mlx.core as mx
-    from types import SimpleNamespace
     from tmt.benchmark import evaluate
 
-    fields = ('states', 'decaytrace', 'embedtrace'); block = SimpleNamespace(states=mx.array([91.]), decaytrace=mx.array([92.]), embedtrace=mx.array([[93.]]))
-    model, uniform = SimpleNamespace(blocks=[block]), [False]
-    def reset(): block.states, block.decaytrace, block.embedtrace = mx.zeros((1,)), mx.zeros((1,)), mx.zeros((1, 1))
-    def step(current, dummies=None, frozen=False):
-        assert frozen
-        byte = int(current.item())
-        state = (int(block.states.item()) * 3 + byte) % 17
-        block.states = mx.array([float(state)])
-        logits = mx.zeros((256,)) if uniform[0] else mx.array([state / 5 if i == byte else 0 for i in range(256)])
-        return ((None, [], []), (logits, mx.zeros((1,))))
-    model.reset, model.step = reset, step
-    saved = [mx.array(getattr(block, field)) for field in fields]
-    mx.eval(*saved)
-    def unchanged(): assert all((mx.array_equal(getattr(block, field), value).item() for field, value in zip(fields, saved)))
-    uniform[0] = True
+    class FakeBlock:
+        state_fields = ('cache',)
+        trace_fields = ('history',)
+
+        def __init__(self):
+            self.cache = mx.array([91.])
+            self.history = mx.array([[93.]])
+
+        def reset(self):
+            self.cache = mx.zeros_like(self.cache)
+            self.history = mx.zeros_like(self.history)
+
+        def snapshot_state(self):
+            saved = {name: mx.array(getattr(self, name))
+                     for name in self.state_fields + self.trace_fields}
+            mx.eval(*saved.values())
+            return saved
+
+        def restore_state(self, saved):
+            for name, value in saved.items():
+                setattr(self, name, value)
+
+        def eval_state(self):
+            mx.eval(*(getattr(self, name)
+                      for name in self.state_fields + self.trace_fields))
+
+    class FakeModel:
+        def __init__(self):
+            self.blocks = [FakeBlock()]
+            self.uniform = False
+
+        def reset(self):
+            for block in self.blocks:
+                block.reset()
+
+        def snapshot_state(self):
+            return [block.snapshot_state() for block in self.blocks]
+
+        def restore_state(self, saved):
+            for block, block_saved in zip(self.blocks, saved):
+                block.restore_state(block_saved)
+
+        def eval_state(self):
+            for block in self.blocks:
+                block.eval_state()
+
+        def step(self, current, dummies=None, frozen=False):
+            assert frozen
+            block = self.blocks[0]
+            byte = int(current.item())
+            state = (int(block.cache.item()) * 3 + byte) % 17
+            block.cache = mx.array([float(state)])
+            block.history = block.history + mx.array([[float(byte)]])
+            logits = (mx.zeros((256,)) if self.uniform else
+                      mx.array([state / 5 if i == byte else 0 for i in range(256)]))
+            return ((None, [], []), (logits, mx.zeros((1,))))
+
+    model = FakeModel()
+    saved = model.snapshot_state()
+    def unchanged():
+        current = model.snapshot_state()
+        assert len(current) == len(saved)
+        for actual, expected in zip(current, saved):
+            assert actual.keys() == expected.keys()
+            assert all(mx.array_equal(actual[name], expected[name]).item()
+                       for name in expected)
+    model.uniform = True
     for windows in ((0,), (-1,), (1, 0)):
         with pytest.raises(ValueError, match='windows must be positive'):
             evaluate(model, [b'ab'], windows)
@@ -685,7 +754,7 @@ def test_evaluate(assert_almost_equal):
     uniform_score = evaluate(model, [b'aa'])
     assert_almost_equal(uniform_score['bpb'], 8.0, delta=1e-6)
     assert uniform_score['common_bpb'] is None
-    uniform[0], documents, windows = False, [b'aa', b'abcde', b'', b'xy', b'pqrs'], (1, 2)
+    model.uniform, documents, windows = False, [b'aa', b'abcde', b'', b'xy', b'pqrs'], (1, 2)
 
     def manual(prefix, target):
         state = sum(byte * 3 ** power for byte, power in zip(prefix, reversed(range(len(prefix))))) % 17
@@ -715,7 +784,8 @@ def test_benchmark(assert_almost_equal):
     from tmt.benchmark import BYTE_DOCUMENTS, CONTEXT_WINDOWS, mcc, run
     from tmt.cli import new_model, save_checkpoint
 
-    settings = {'dim': 4, 'layers': 1, 'spread': 4, 'temp': 0.75, 'rate': 0.0005, 'bound': [40000, 120000]}
+    settings = {'dim': 4, 'layers': 1, 'spread': 4, 'temp': 0.75, 'rate': 0.0005,
+                'bound': [40000, 120000], 'block': 'rtu'}
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         model = new_model(settings, 11)
@@ -736,11 +806,20 @@ def test_benchmark(assert_almost_equal):
         assert byte_only['byte_scores']['targets'] == 390
         assert '104 targets' in stdout.getvalue()
         assert all((mx.array_equal(value, getattr(model.blocks[0], field)).item() for value, field in zip(states, fields)))
-        result = run(str(checkpoint), 1, 0.5, str(data), model=model, seed=11)
+        with contextlib.redirect_stdout(stdout):
+            result = run(str(checkpoint), 1, 0.5, str(data), model=model, seed=11)
         assert byte_only['byte_scores'] == result['byte_scores']
+        assert result['feature_convention'] == 'recurrent-state'
+        assert 'CoLA feature convention: recurrent-state' in stdout.getvalue()
         for partition in ('train', 'held'):
             score = result['epochs'][0][partition]
             assert sum((score[key] for key in ('tp', 'tn', 'fp', 'fn'))) == 2
+        from unittest.mock import patch
+        with (patch('tmt.benchmark.evaluate', return_value={
+                  'bpb': 8.0, 'targets': 1, 'common_bpb': 8.0, 'common_targets': 1, 'windows': [],
+              }), patch.object(model.blocks[-1], 'features', return_value=mx.zeros((model.dim, 1))),
+              pytest.raises(ValueError, match='CoLA features must be an MLX array with shape')):
+            run(str(checkpoint), 1, 0.5, str(data), model=model, seed=11)
         with pytest.raises(FileNotFoundError): run(str(checkpoint), data=str(root / 'missing.tsv'), model=model)
 
     scores = result['byte_scores']
@@ -760,7 +839,8 @@ def _checkpoint(path):
     import mlx.core as mx
     from tmt.cli import new_model, save_checkpoint
 
-    settings = {'dim': 4, 'layers': 1, 'spread': 4, 'temp': 0.75, 'rate': 0.0005, 'bound': [40000, 120000]}
+    settings = {'dim': 4, 'layers': 1, 'spread': 4, 'temp': 0.75, 'rate': 0.0005,
+                'bound': [40000, 120000], 'block': 'rtu'}
     model = new_model(settings, 11)
     save_checkpoint(path, model, settings)
     arrays, metadata = mx.load(path, return_metadata=True)
@@ -972,13 +1052,18 @@ def test_sweep_records_execution_failure_and_preserves_results(subtests):
             grid.write_text('{"seed": [11, 22]}')
             data.write_bytes(b'ab')
             output = root / 'sweep'
-            with (patch('tmt.cli.train', side_effect=[Mock(), error_type('injected failure')]),
+            completed_model = Mock()
+            completed_model.count.return_value = 7
+            completed_model.temporal_gradient = ['rtu-v1']
+            with (patch('tmt.cli.train', side_effect=[completed_model, error_type('injected failure')]),
                   patch('tmt.benchmark.evaluate', return_value={'targets': 1, 'bpb': 8.0}),
                   pytest.raises(error_type)):
                 sweep(grid, str(data), str(data), output, config, updates=1)
             record = json.loads((output / 'sweep.json').read_text())
             assert (record['status'], record['current_run'], record['completed_runs']) == (status, 2, 1)
             assert record['error'] == {'type': error_type.__name__, 'message': 'injected failure'}
+            first_row = json.loads((output / 'results.jsonl').read_text().splitlines()[0])
+            assert (first_row['trainable_parameters'], first_row['temporal_gradient']) == (7, ['rtu-v1'])
             rows = (output / 'results.jsonl').read_bytes()
             with pytest.raises(FileExistsError, match='choose a new output folder'):
                 sweep(grid, str(data), str(data), output, config, updates=1)
@@ -991,6 +1076,7 @@ def test_sweep_records_execution_failure_and_preserves_results(subtests):
 def test_sweep(subtests):
     from io import StringIO
     from tmt.cli import load_model, sweep
+    from tmt.blocks import BLOCKS
 
     from tmt.cli import main
     with patch('tmt.cli.sweep') as command:
@@ -1009,29 +1095,36 @@ def test_sweep(subtests):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         grid, config = root / 'grid.json', root / 'model.json'
-        grid.write_text(json.dumps({'dim': [4, 8], 'seed': [11, 22]}))
+        grid.write_text(json.dumps({'block': ['rtu', 'rtu-test'], 'seed': [11, 22]}))
         config.write_text(json.dumps(_tiny_settings()))
         train, development = root / 'train.bin', root / 'development.bin'
         train.write_bytes(b'\x00\x01\x02')
         development.write_bytes(b'\xf0\xf1\xf2\xf3')
         for ce_only in (False, True):
-            with subtests.test(ce_only=ce_only):
+            with subtests.test(ce_only=ce_only), patch.dict(BLOCKS, {'rtu-test': BLOCKS['rtu']}):
                 output, stdout = root / ('runs-ce' if ce_only else 'runs'), StringIO()
                 with contextlib.redirect_stdout(stdout):
                     best = sweep(grid, str(train), str(development), output, config, 2, 11, ce_only,
                                  max_bytes=4, log_every=1, sample_every=2, sample_bytes=3,
                                  eval_data=str(development), eval_every=2, eval_max_bytes=3)
                 rows = [json.loads(line) for line in (output / 'results.jsonl').read_text().splitlines()]
-                assert [(row['settings']['dim'], row['seed']) for row in rows] == [(4, 11), (4, 22), (8, 11), (8, 22)]
+                assert [(row['settings']['block'], row['seed']) for row in rows] == [
+                    ('rtu', 11), ('rtu', 22), ('rtu-test', 11), ('rtu-test', 22),
+                ]
                 assert best == min(rows, key=lambda row: row['development_bpb'])
                 assert json.dumps(best) in stdout.getvalue()
                 for index, row in enumerate(rows, 1):
                     checkpoint = Path(row['checkpoint'])
                     assert (row['objective'], row['development_targets']) == ('ce_only' if ce_only else 'tmt', 3)
+                    assert row['trainable_parameters'] > 0
+                    assert row['temporal_gradient'] == ['rtu-v1']
                     assert json.loads((checkpoint.parent / 'manifest' / 'model.json').read_text()) == row['settings']
                     manifest = json.loads((checkpoint.parent / 'manifest' / 'run.json').read_text())
                     assert (set(manifest), manifest['status'], manifest['last_checkpoint']) == (MANIFEST_FIELDS, 'complete', str(checkpoint.resolve()))
                     assert manifest['config'] == row['settings']
+                    assert (manifest['trainable_parameters'], manifest['temporal_gradient']) == (
+                        row['trainable_parameters'], row['temporal_gradient']
+                    )
                     assert manifest['log_every'] == 1
                     metrics = [json.loads(line) for line in (checkpoint.parent / 'manifest/loss.jsonl').read_text().splitlines()]
                     assert [metric['completed_updates'] for metric in metrics] == [1, 2]
@@ -1045,6 +1138,8 @@ def test_sweep(subtests):
                     assert (manifest['data_files'], manifest['completed_updates'], manifest['resume'], manifest['initial_optimizer_step']) == ([str(train.resolve())], row['updates'], False, 0)
                     model, settings = load_model(checkpoint, row['seed'])
                     assert settings == row['settings']
+                    assert row['trainable_parameters'] == model.count()
+                    assert row['temporal_gradient'] == model.temporal_gradient
                     assert int(model.optimizer.state['step'].item()) == 2
                     assert checkpoint.parent.name == f'run-{index:04d}'
 
@@ -1061,10 +1156,14 @@ def test_checkpoint_header(subtests, saved_checkpoint):
     missing = dict(header)
     missing['model'] = dict(header['model'])
     missing['model'].pop('spread')
+    missing_block = dict(header)
+    missing_block['model'] = dict(header['model'])
+    missing_block['model'].pop('block')
     bad_version = dict(header)
     bad_version['version'] = True
     cases = [('missing metadata', None, '__metadata__'),
              ('missing model field', {'tmt': json.dumps(missing)}, 'spread'),
+             ('missing block selector', {'tmt': json.dumps(missing_block)}, 'block'),
              ('bad version', {'tmt': json.dumps(bad_version)}, 'version')]
     for label, invalid, field in cases:
         with subtests.test(label=label):

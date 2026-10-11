@@ -29,16 +29,10 @@ def _model_snapshot(model):
             name: mx.array(value)
             for name, value in util.tree_flatten(model.optimizer.state)
         },
-        'recurrent': [
-            {
-                name: mx.array(getattr(layer, name))
-                for name in ('states', 'decaytrace', 'embedtrace')
-            }
-            for layer in model.blocks
-        ],
+        'runtime_state': model.snapshot_state(),
     }
     mx.eval(*snapshot['parameters'].values(), *snapshot['optimizer'].values())
-    mx.eval(*(value for layer in snapshot['recurrent'] for value in layer.values()))
+    mx.eval(*(value for block in snapshot['runtime_state'] for value in block.values()))
     return snapshot
 
 
@@ -53,9 +47,11 @@ def _assert_model_snapshot(model, snapshot):
     assert optimizer.keys() == snapshot['optimizer'].keys()
     assert all((mx.array_equal(value, parameters[name]).item() for name, value in snapshot['parameters'].items()))
     assert all((mx.array_equal(value, optimizer[name]).item() for name, value in snapshot['optimizer'].items()))
-    for layer, saved in zip(model.blocks, snapshot['recurrent']):
-        mx.eval(*(getattr(layer, name) for name in saved))
-        assert all((mx.array_equal(value, getattr(layer, name)).item() for name, value in saved.items()))
+    actual_state = model.snapshot_state()
+    assert len(actual_state) == len(snapshot['runtime_state'])
+    for actual, saved in zip(actual_state, snapshot['runtime_state']):
+        assert actual.keys() == saved.keys()
+        assert all((mx.array_equal(value, actual[name]).item() for name, value in saved.items()))
 
 
 def _trained_model():
@@ -158,8 +154,9 @@ def test_sampling_does_not_change_training_updates_and_resume_uses_global_step()
         assert sampled_state['optimizer'].keys() == plain_state['optimizer'].keys()
         for group in ('parameters', 'optimizer'):
             assert all((mx.array_equal(value, plain_state[group][name]).item() for name, value in sampled_state[group].items()))
-        for sample_layer, plain_layer in zip(sampled_state['recurrent'], plain_state['recurrent']):
-            assert all((mx.array_equal(value, plain_layer[name]).item() for name, value in sample_layer.items()))
+        for sampled_block, plain_block in zip(sampled_state['runtime_state'], plain_state['runtime_state']):
+            assert all((mx.array_equal(value, plain_block[name]).item()
+                        for name, value in sampled_block.items()))
 
         samples_path = sampled_checkpoint.parent / 'manifest' / 'samples.jsonl'
         rows = [json.loads(line) for line in samples_path.read_text().splitlines()]

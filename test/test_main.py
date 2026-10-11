@@ -1,3 +1,4 @@
+import json
 import math
 import random
 import subprocess
@@ -46,6 +47,105 @@ import tmt.main
         assert int(model.optimizer.state['step'].item()) == 2
 
 
+def test_seeded_rtu_training_matches_reference():
+    import mlx.core as mx
+    import mlx.utils as util
+    from tmt.main import Model
+
+    fixture_path = Path(__file__).parent / 'fixtures' / 'rtu-baseline.json'
+    fixture = json.loads(fixture_path.read_text())
+    seed = fixture['seed']
+    random.seed(seed)
+    mx.random.seed(seed)
+    config = fixture['config']
+    model = Model(**config)
+    mx.eval(model.parameters())
+
+    def values(array):
+        nested = array.tolist()
+        result = []
+
+        def visit(item):
+            if isinstance(item, list):
+                for child in item:
+                    visit(child)
+            else:
+                result.append(float(item))
+
+        visit(nested)
+        return result
+
+    def summary(array):
+        mx.eval(array)
+        flattened = values(array)
+        return {
+            'shape': list(array.shape),
+            'sum': sum(flattened),
+            'sum_squares': sum(value * value for value in flattened),
+            'max_abs': max((abs(value) for value in flattened), default=0.0),
+            'head': flattened[:6],
+            'tail': flattened[-6:],
+        }
+
+    def summary_tree(tree):
+        return {str(path): summary(value) for path, value in util.tree_flatten(tree)}
+
+    actual_updates = []
+    original_updategrads = model.updategrads
+
+    def capture_updategrads(grads):
+        record = actual_updates[-1]
+        record['compiled_before_update'] = model.compiled is not None
+        record['gradients'] = summary_tree(grads)
+        original_updategrads(grads)
+        mx.eval(model.parameters(), model.optimizer.state)
+        record['optimizer'] = summary_tree(model.optimizer.state)
+
+    model.updategrads = capture_updategrads
+    for currb, nextb, end in ((65, 66, False), (66, 67, True), (67, 68, False)):
+        record = {'input': currb, 'target': nextb, 'end': end}
+        actual_updates.append(record)
+        metrics = {}
+        output, stop, loss = model.train_step(currb, nextb, end, metrics=metrics)
+        mx.eval(output, stop, loss, *metrics.values())
+        record['loss'] = float(loss.item())
+        record['components'] = metrics
+        record['output'] = values(output)
+        record['stop'] = values(stop)
+        record['state'] = {
+            f'blocks.{i}': {
+                name: summary(getattr(layer, name))
+                for name in ('states', 'decaytrace', 'embedtrace')
+            }
+            for i, layer in enumerate(model.blocks)
+        }
+        record['active_embedtrace_rows'] = {
+            f'blocks.{i}': {
+                str(byte): values(layer.embedtrace[byte])
+                for byte in (65, 66, 67)
+            }
+            for i, layer in enumerate(model.blocks)
+        }
+
+    def assert_reference(actual, expected, path='fixture'):
+        if isinstance(expected, dict):
+            assert actual.keys() == expected.keys(), path
+            for key in expected:
+                assert_reference(actual[key], expected[key], f'{path}.{key}')
+        elif isinstance(expected, list):
+            assert len(actual) == len(expected), path
+            for index, (actual_item, expected_item) in enumerate(zip(actual, expected)):
+                assert_reference(actual_item, expected_item, f'{path}[{index}]')
+        elif isinstance(expected, bool):
+            assert actual is expected, path
+        elif isinstance(expected, (int, str)):
+            assert actual == expected, path
+        else:
+            assert math.isclose(actual, expected, rel_tol=1e-5, abs_tol=1e-6), path
+
+    assert_reference(actual_updates, fixture['updates'])
+
+
 def test_byte_io_recurrence_and_reset():
     import mlx.core as mx
     from tmt.main import Model
@@ -63,10 +163,10 @@ def test_byte_io_recurrence_and_reset():
     decay = mx.sigmoid(layer.decay)
     expected_state = mx.array(encoded)
     (_, first_states, _), _ = model.step(byte, frozen=True)
-    assert mx.allclose(first_states[0], expected_state, atol=1e-06).item()
+    assert mx.allclose(first_states[0]['states'], expected_state, atol=1e-06).item()
     expected_state = decay * expected_state + encoded
     (_, second_states, _), _ = model.step(byte, frozen=True)
-    assert mx.allclose(second_states[0], expected_state, atol=1e-06).item()
+    assert mx.allclose(second_states[0]['states'], expected_state, atol=1e-06).item()
 
     model.train_step(65, 66, False)
     mx.eval(layer.embedtrace)

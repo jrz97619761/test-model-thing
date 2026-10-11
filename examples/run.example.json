@@ -1,0 +1,30 @@
+{
+  "config": {
+    "dim": 512,
+    "layers": 16,
+    "spread": 32,
+    "temp": 0.75,
+    "rate": 0.0005,
+    "bound": [
+      40000,
+      120000
+    ],
+    "block": "rtu"
+  },
+  "seed": 11,
+  "trainable_parameters": null,
+  "temporal_gradient": null,
+  "data_glob": "data/train/*",
+  "data_files": [],
+  "updates": 1000,
+  "log_every": 100,
+  "objective": "tmt",
+  "completed_updates": 0,
+  "resume": false,
+  "initial_optimizer_step": 0,
+  "started_at": null,
+  "sample": null,
+  "evaluation": null,
+  "status": "running",
+  "last_checkpoint": null
+}

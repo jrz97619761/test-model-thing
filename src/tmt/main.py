@@ -1,8 +1,9 @@
-import math
-
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as opt
+from mlx.utils import tree_flatten
+
+from .blocks import BLOCKS, Block, Layer, validate_block
 
 class Encoder(nn.Module):
     def __init__(self, dim: int):
@@ -19,33 +20,10 @@ class Decoder(nn.Module):
 
     def __call__(self, x: mx.array): return self.decode(x), mx.sigmoid(self.stop(x))
 
-class Layer(nn.Module):
-    def __init__(self, dim: int, spread: int):
-        super().__init__()
-
-        halflives = mx.exp(mx.linspace(0.0, math.log(float(spread)), dim))
-        retention = mx.exp(-math.log(2.0) / halflives)
-        self.decay = mx.log(retention) - mx.log1p(-retention)
-
-        self.states = mx.zeros((dim, ))
-        self.decaytrace = mx.zeros((dim, ))
-        self.embedtrace = mx.zeros((256, dim))
-
-        self.norm = nn.LayerNorm(dim)
-        self.weights = nn.Linear(dim, dim, bias = False)
-        self.silu = nn.SiLU()
-
-        self.freeze(keys = ['states', 'decaytrace', 'embedtrace'], recurse = False)
-
-    def __call__(self, enc: mx.array, x: mx.array, dummy: mx.array):
-        decay = mx.sigmoid(self.decay)
-        state = (decay * self.states) + enc + dummy
-
-        return x + self.silu(self.weights(self.norm(state))), state, decay
-
 class Model(nn.Module):
-    def __init__(self, dim: int = 512, layers: int = 16, spread: int = 32, temp: float = 0.75, rate: float = 0.0005, bound: tuple[int, int] = (40000, 120000)):
+    def __init__(self, dim: int = 512, layers: int = 16, spread: int = 32, temp: float = 0.75, rate: float = 0.0005, bound: tuple[int, int] = (40000, 120000), block: str = "rtu"):
         super().__init__()
+        validate_block(block)
         self.dim = dim
         self.layers = layers
         self.temp = temp
@@ -53,7 +31,11 @@ class Model(nn.Module):
         self.encoder = Encoder(dim)
         self.decoder = Decoder(dim)
 
-        self.blocks = [Layer(dim, spread) for _ in range(layers)]
+        self.blocks = [BLOCKS[block](dim, spread) for _ in range(layers)]
+        for layer in self.blocks:
+            if not isinstance(layer, Block):
+                raise ValueError('block factories must return a Block module')
+            layer.validate()
 
         def lrfn(step: mx.array):
             progress = mx.clip((step.astype(mx.float32) + 1.0 - float(bound[0])) / float(bound[1] - bound[0]), 0.0, 1.0)
@@ -69,22 +51,23 @@ class Model(nn.Module):
         temp = mx.maximum(0.1, self.temp * (1.0 - self.temp * entropy)).item()
         return mx.random.categorical(output / temp, key=key)
 
-    def step(self, c: mx.array, dummies: mx.array | None = None, frozen: bool = False):
-        if dummies is None: dummies = [mx.zeros((self.dim, )) for _ in range(self.layers)]
+    def step(self, c: mx.array, dummies: list[mx.array] | None = None, frozen: bool = False):
+        if dummies is None: dummies = [layer.probe() for layer in self.blocks]
 
         enc = self.encoder(c)
         x = enc
 
-        states, decays = [], []
+        states, auxiliary = [], []
 
         for i, layer in enumerate(self.blocks):
-            x, state, decay = layer(enc, x, dummies[i])
-            if frozen: layer.states = mx.stop_gradient(state)
+            x, state, aux = layer(enc, x, dummies[i])
+            layer.validate_result(enc, x, state)
+            if frozen: layer.commit_state(state)
 
             states.append(state)
-            decays.append(decay)
+            auxiliary.append(aux)
 
-        return (x, states, decays), self.decoder(x)
+        return (x, states, auxiliary), self.decoder(x)
 
     def updategrads(self, grads):
         if self.compiled is None:
@@ -135,37 +118,41 @@ class Model(nn.Module):
 
         def fwd(params, dummies: list[mx.array]):
             self.update(params)
-            (x, states, decays), (output, stop) = self.step(c, dummies)
+            (x, states, auxiliary), (output, stop) = self.step(c, dummies)
             components = {}
             loss = self.loss(x, output, stop, nextb, end, ce_only, components)
-            return loss, (states, decays, output, stop, components)
+            return loss, (states, auxiliary, output, stop, components)
 
-        (loss, (states, decays, output, stop, components)), (grads, dlds_s) = mx.value_and_grad(
+        (loss, (states, auxiliary, output, stop, components)), (grads, dlds_s) = mx.value_and_grad(
             fwd, argnums = (0, 1)
-        )(p, [mx.zeros((self.dim, )) for _ in range(self.layers)])
+        )(p, [layer.probe() for layer in self.blocks])
 
         self.update(p)
 
-        c_range = (mx.arange(256) == c)[:, None].astype(mx.float32)
+        block_grads = grads.get('blocks', [{} for _ in self.blocks])
         for i, layer in enumerate(self.blocks):
-            dlds = dlds_s[i]
+            local = block_grads[i]
+            templates = dict(tree_flatten(local))
+            adjusted, encoder_addition, traces = layer.adjust_gradients(
+                c, states[i], auxiliary[i], dlds_s[i], local
+            )
+            actual = dict(tree_flatten(adjusted))
+            if actual.keys() != templates.keys() or any(
+                not isinstance(actual[name], mx.array)
+                or actual[name].shape != value.shape or actual[name].dtype != value.dtype
+                for name, value in templates.items()
+            ):
+                raise ValueError('block gradient hook must retain local gradient names, shapes, and dtypes')
+            block_grads[i] = adjusted
+            if encoder_addition is not None:
+                embedding = grads['encoder']['embed']['weight']
+                if (not isinstance(encoder_addition, mx.array)
+                        or encoder_addition.shape != embedding.shape or encoder_addition.dtype != embedding.dtype):
+                    raise ValueError('block encoder gradient must retain embedding shape and dtype')
+                grads['encoder']['embed']['weight'] += encoder_addition
+            layer.commit_state(states[i], traces)
 
-            decay_embedtrace = layer.embedtrace * decays[i]
-            embedtrace = decay_embedtrace + c_range
-            grads["encoder"]["embed"]["weight"] += dlds * decay_embedtrace
-
-            decaytrace = (decays[i] * layer.decaytrace) + (decays[i] * (1.0 - decays[i]) * layer.states)
-            grads["blocks"][i]["decay"] = dlds * decaytrace
-
-            layer.states = mx.stop_gradient(states[i])
-            layer.decaytrace = mx.stop_gradient(decaytrace)
-            layer.embedtrace = mx.stop_gradient(embedtrace)
-
-        mx.eval(*[
-            value
-            for layer in self.blocks
-            for value in (layer.states, layer.decaytrace, layer.embedtrace)
-        ])
+        self.eval_state()
 
         if metrics is not None:
             mx.eval(loss, *components.values())
@@ -179,7 +166,7 @@ class Model(nn.Module):
         if frozen:
             _, (output, stop) = self.step(c, frozen = True)
 
-            mx.eval(*[layer.states for layer in self.blocks])
+            self.eval_state()
             return self.sample(output).item(), stop.item()
 
         output, stop, _ = self.train_step(currb, nextb, end, ce_only)
@@ -187,13 +174,28 @@ class Model(nn.Module):
 
     def reset(self):
         for layer in self.blocks:
-            layer.states = mx.zeros((self.dim, ))
+            layer.reset()
+        self.eval_state()
 
-            layer.decaytrace = mx.zeros((self.dim, ))
-            layer.embedtrace = mx.zeros((256, self.dim))
+    def snapshot_state(self):
+        return [layer.snapshot_state() for layer in self.blocks]
 
-        mx.eval(*[layer.states for layer in self.blocks])
+    def restore_state(self, snapshot):
+        if len(snapshot) != len(self.blocks):
+            raise ValueError('model state snapshot must contain every block')
+        for layer, saved in zip(self.blocks, snapshot):
+            layer._validate_values(saved, layer.state_fields + layer.trace_fields)
+        for layer, saved in zip(self.blocks, snapshot):
+            layer.restore_state(saved)
+
+    def eval_state(self):
+        for layer in self.blocks:
+            layer.eval_state()
+
+    @property
+    def temporal_gradient(self):
+        return [layer.temporal_gradient for layer in self.blocks]
 
     def count(self) -> int:
-        per_layer = self.dim * self.dim + 3 * self.dim
-        return 256 * self.dim + self.layers * per_layer + 256 * self.dim + 256 + self.dim + 1
+        """Count currently trainable tensor elements, before a full-model freeze."""
+        return sum(value.size for _, value in tree_flatten(self.trainable_parameters()))

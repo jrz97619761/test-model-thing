@@ -65,11 +65,21 @@ def mcc(tp, tn, fp, fn):
 def rollout(model: Model, b_s: bytes):
     model.reset()
 
-    for b in b_s: _, _ = model.step(mx.array(b), frozen = True)
-    state = model.blocks[-1].states
+    x = None
+    for b in b_s:
+        (x, _, _), _ = model.step(mx.array(b), frozen=True)
+    if x is None:
+        return None
 
-    if state is not None: mx.eval(state)
-    return state
+    features = model.blocks[-1].features(x)
+    if not isinstance(features, mx.array) or tuple(features.shape) != (model.dim,):
+        actual_shape = tuple(features.shape) if isinstance(features, mx.array) else type(features).__name__
+        raise ValueError(
+            f'CoLA features must be an MLX array with shape ({model.dim},); got {actual_shape}'
+        )
+    model.eval_state()
+    mx.eval(features)
+    return features
 
 
 def _evaluation_step(model, current):
@@ -86,7 +96,7 @@ def _bpb(nll_sum, targets):
 
 
 def evaluate(model, documents, windows=()):
-    """Score next bytes with frozen steps and restore live states and RTU traces."""
+    """Score next bytes with frozen steps and restore live model state."""
     documents, windows = tuple(documents), tuple(windows)
     if any(window <= 0 for window in windows):
         raise ValueError('evaluation windows must be positive')
@@ -98,11 +108,7 @@ def evaluate(model, documents, windows=()):
             '(a document with at least two bytes)'
         )
     common_start = max(windows) if windows else None
-    snapshot = [
-        [mx.array(block.states), mx.array(block.decaytrace), mx.array(block.embedtrace)]
-        for block in model.blocks
-    ]
-    mx.eval(*(value for saved in snapshot for value in saved))
+    snapshot = model.snapshot_state()
     full_nll = common_nll = 0.0
     common_targets = 0
     try:
@@ -117,7 +123,7 @@ def evaluate(model, documents, windows=()):
                     if common_start is not None and target_offset >= common_start:
                         common_nll += loss
                         common_targets += 1
-            mx.eval(*(block.states for block in model.blocks))
+            model.eval_state()
 
         scores = []
         for window in windows:
@@ -141,9 +147,8 @@ def evaluate(model, documents, windows=()):
                 'delta_bpb': common_bpb - _bpb(common_nll, common_targets) if common_targets else None,
             })
     finally:
-        for block, saved in zip(model.blocks, snapshot):
-            block.states, block.decaytrace, block.embedtrace = saved
-        mx.eval(*(value for block in model.blocks for value in (block.states, block.decaytrace, block.embedtrace)))
+        model.restore_state(snapshot)
+        model.eval_state()
 
     return {
         'input_bytes': input_bytes,
@@ -221,6 +226,7 @@ def run(path: str, epochs: int = 1, split: float = 0.5, data: str | None = None,
         loss = nn.losses.cross_entropy(choice[None, :], mx.array([target])).mean()
         return loss, choice
 
+    print(f"CoLA feature convention: {model.blocks[-1].feature_convention}")
     print('Starting benchmark.')
 
     epoch_scores = []
@@ -231,7 +237,11 @@ def run(path: str, epochs: int = 1, split: float = 0.5, data: str | None = None,
         epoch_scores.append({'epoch': epoch + 1, 'train': train_score, 'held': held_score})
         for name, score in (('train', train_score), ('held', held_score)):
             print(f"Epoch {epoch + 1} {name}: T+ {score['tp']}, T- {score['tn']}, F+ {score['fp']}, F- {score['fn']}, MCC x 100: {score['mcc']:.4f}")
-    return {'byte_scores': byte_scores, 'epochs': epoch_scores}
+    return {
+        'byte_scores': byte_scores,
+        'feature_convention': model.blocks[-1].feature_convention,
+        'epochs': epoch_scores,
+    }
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description = 'CoLA benchmark for test-model-thing')

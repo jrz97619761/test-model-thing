@@ -2,6 +2,7 @@
   "dim": 512,
   "layers": 16,
   "spread": 32,
+  "block": "rtu",
   "temp": 0.75,
   "rate": 0.0005,
   "bound": [

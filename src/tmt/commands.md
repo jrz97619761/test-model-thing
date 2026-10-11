@@ -9,9 +9,62 @@ Sample prompts must be nonempty. Sample byte counts and evaluation byte budgets 
 
 Relative paths use the current directory. The CLI does not search parent folders for files or runs. Data globs select raw files. The CLI sorts paths that match. Each file is one document, and the model resets at each document boundary. The CLI reads file contents as bytes, adds no separators, and does not decode them as text.
 
-The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, and `bound`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, and `[40000, 120000]`. `rate` is the learning rate, `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss.
+The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, `bound`, and `block`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, `[40000, 120000]`, and `"rtu"`. The package registers only the `rtu` block. The optimizer uses `rate` as the weight update rate. `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss.
 
-`dim`, `layers`, and `spread` must be positive integers. `temp` must be a finite nonnegative number. `rate` must be a finite positive number. `bound` must be a JSON array of two integers with `0 <= start < end`. Boolean values are invalid for these fields. The CLI checks config values and sweep grid values before model creation.
+`dim`, `layers`, and `spread` must be positive integers. `temp` must be a finite nonnegative number. `rate` must be a finite positive number. `bound` must be a JSON array of two integers with `0 <= start < end`.
+
+`block` must name a registered block. Boolean values are invalid for numeric fields. The CLI checks config values and sweep grid values before model creation or output creation.
+
+## Blocks
+
+The `block` field selects one factory for every layer. The current package registers only `rtu`.
+The default config value is `"rtu"`. A custom block needs a local factory entry in `src/tmt/blocks.py`.
+
+The Python method `Model.step()` returns `((x, state_results, auxiliary_results), (logits, stop))`.
+`state_results` contains one dictionary per block, with keys from `state_fields`.
+`auxiliary_results` contains one block-specific value per block.
+This internal return structure does not change CLI output.
+
+Each factory creates one fresh block per layer. The block call uses `enc`, `x`, and `probe` inputs.
+It returns `(x_next, next_state, aux)`. `x_next` has shape `[dim]` and keeps the model dtype.
+`next_state` is a dictionary with exactly the field names in `state_fields`.
+
+`state_fields` lists public arrays that advance on each byte. `trace_fields` lists public arrays for temporal gradient history.
+Blocks create these fields before optimizer setup and freeze them as runtime state.
+All block parameters stay in the normal MLX parameter tree.
+Block state shapes stay fixed for the life of the model.
+
+`reset()` clears state and traces at each document boundary. `probe()` returns an auxiliary value for differentiation.
+The default probe is an unused scalar. RTU returns a zero vector with shape `[dim]`.
+The `adjust_gradients()` hook receives the byte, candidate state, auxiliary data, probe cotangent, and local gradients.
+The hook returns `(grads, encoder_addition, traces)`.
+
+The default hook returns autodiff gradients unchanged, no encoder gradient addition, and no trace updates.
+
+An empty trace dictionary leaves traces unchanged. A trace update must contain every name in `trace_fields`.
+
+The RTU hook uses label `rtu-v1`. It adds the prior temporal trace contributions for block decay and the shared encoder.
+The default label is `one-step-autodiff`. It covers gradients within one byte step.
+It does not propagate gradients through detached byte history.
+
+The forward call returns candidate state.
+It does not change persistent arrays.
+The model commits candidate state after differentiation, or after a frozen step.
+Frozen steps advance only `state_fields`. They do not change traces, weights, or optimizer state.
+
+The helper names are `snapshot_state()`, `restore_state()`, `commit_state()`, and `eval_state()`.
+Blocks use these helpers to copy, restore, commit, and evaluate declared fields.
+The model applies snapshot, restore, and evaluation across all blocks.
+Evaluation and samples restore state after success or error.
+
+`features(x)` returns one `[dim]` vector for CoLA. The default uses `x` with feature convention `final-output`.
+RTU uses its recurrent state with feature convention `recurrent-state`.
+The CoLA result records `feature_convention` because MCC can change with the feature choice.
+
+Resolved model config and checkpoint metadata both contain `block`.
+The checkpoint loader requires every current config field and the `block` selector.
+An earlier checkpoint without this selector fails validation, even if its version marker is `1`.
+The loader does not add a default for missing metadata. Create fresh artifacts with this release.
 
 ## init
 
@@ -40,9 +93,9 @@ tmt init --output configs/model.json
 ```
 
 ### Behavior and files
-Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the model constructor defaults. Edit it before a real experiment. The run template sets `sample` and `evaluation` to `null`.
+Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the model constructor defaults, with `"block": "rtu"`. Edit it before a real experiment. The run template sets `sample` and `evaluation` to `null`.
 
-`grid.json` has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, and `seed=[11,22]`. `run.example.json` shows the manifest fields with an empty file list and a null timestamp. It is a template, not a run record. The command opens each JSON destination in exclusive-create mode. If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
+`grid.json` has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, `block=["rtu"]`, and `seed=[11,22]`. `run.example.json` shows the manifest fields with an empty file list. It has null values for `started_at`, `trainable_parameters`, and `temporal_gradient`. It is a template, not a run record. The command opens each JSON destination in exclusive-create mode. If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
 
 The `--output` form creates parent folders as needed. It writes only the model config and does not create workspace folders.
 
@@ -88,7 +141,7 @@ tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 
 ```
 
 ### Behavior and files
-The CLI sorts matched paths and shuffles them once from `--seed`. It repeats that order until it reaches `--updates`. Each adjacent byte pair gives one target-byte update. The model resets internal state and RTU traces at each file boundary. A file with fewer than two bytes gives no update. It consumes the terminal byte without an update.
+The CLI sorts matched paths and shuffles them once from `--seed`. It repeats that order until it reaches `--updates`. Each adjacent byte pair gives one target-byte update. The model resets block state and temporal traces at each file boundary. A file with fewer than two bytes gives no update. It consumes the terminal byte without an update.
 
 A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder. The command checks train and evaluation selections before folder creation. Unmatched globs and unreadable files cause an input error. Correct the input and retry with the same run name.
 
@@ -96,7 +149,9 @@ A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp ru
 
 | Field | Meaning |
 | --- | --- |
-| `config` | Complete model settings for this invocation. Resume uses checkpoint settings. |
+| `config` | Complete model settings for this invocation, with `block`. Resume uses checkpoint settings. |
+| `trainable_parameters` | Count of trainable tensor elements before a full-model freeze. This count excludes runtime state and traces. |
+| `temporal_gradient` | Ordered list of temporal-gradient labels, one for each block in the layer stack. |
 | `seed` | Python and MLX seed for this invocation. |
 | `data_glob` | The train glob as supplied. Relative globs use the invocation directory. |
 | `data_files` | All matched absolute paths, in the shuffled order for each data pass. |
@@ -139,7 +194,7 @@ It always prints the final loss.
 It saves every 500 updates and at the end. It does not save on interrupt. The last successful checkpoint remains on disk.
 
 When `--sample-every` is set, the command samples from frozen weights at each interval.
-It preserves the model's recurrent state, RTU traces, and global random state for the train run.
+It preserves block state, temporal traces, and global random state for the train run.
 It uses `--sample-prompt`, `--sample-seed`, and `--sample-bytes` for each sample.
 The command prints an escaped preview and writes raw bytes to `samples/<UTC timestamp>/step-NNNNNNNNNNNN.bin`.
 The command uses the same sample seed for each sample.
@@ -151,7 +206,7 @@ The command keeps old sample files.
 
 When `--eval-data` and `--eval-every` are set, the command scores held-out files at each update interval.
 It also scores the model after a successful run if the final update is outside an interval.
-The scorer uses frozen weights and restores recurrent state and RTU traces.
+The scorer uses frozen weights and restores block state and temporal traces.
 It writes one JSON object per score to `manifest/evaluation.jsonl`.
 Each row has `completed_updates`, `optimizer_step`, and the normal evaluation fields: `input_bytes`, `targets`, `bpb`, `common_targets`, `common_bpb`, and `windows`.
 
@@ -201,7 +256,28 @@ tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --ou
 ### Behavior and files
 The CLI visits value combinations in the key and value order from the JSON file. It trains one candidate at a time. A grid `seed` value selects that candidate's seed. Other grid values replace fields in the base model config. Each candidate uses a `run-NNNN/` folder under `DIR`. The folder contains `model.safetensors` and a `manifest/` folder.
 
-Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same manifest fields as a standalone train invocation. Its loss rows are in `run-NNNN/manifest/loss.jsonl`. Sample and interval-evaluation files also stay in each candidate folder. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
+Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same manifest fields as a standalone train invocation. Its loss rows are in `run-NNNN/manifest/loss.jsonl`. Sample and interval-evaluation files also stay in each candidate folder. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `trainable_parameters`, `temporal_gradient`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
+
+The package registers only `rtu`. To compare it with a custom block, add a factory to `src/tmt/blocks.py` first.
+Then add the block names and paired seeds to the grid. Keep the base config, data, objective, optimizer settings, and update budget fixed.
+
+```json
+{
+  "block": ["rtu", "candidate-v1"],
+  "seed": [11, 22, 33]
+}
+```
+
+```bash
+tmt sweep --config research.json --grid ab-grid.json \
+  --data 'data/train/*' --development 'data/dev/*' \
+  --output runs/ab-001 --updates 1000
+```
+
+Pair result rows by seed and compare every score. A shared seed repeats the RNG start.
+It does not guarantee equal initial values for differently shaped blocks.
+Equal updates do not mean equal parameter count, compute, or state memory.
+Record the source revision and fixed factory choices with the results.
 
 Interval evaluation uses `--eval-data` and `--eval-every`. It is separate from the development score at the end of each candidate. The development score still selects the best candidate.
 
@@ -246,7 +322,7 @@ tmt evaluate runs/first/model.safetensors --data 'data/dev/*' --windows 8 32 128
 ### Behavior and files
 The command reads a global prefix from sorted files and keeps each file as a separate document. The first byte provides context for the next-byte score. The scorer consumes the terminal byte without a target score. The full score uses all earlier bytes to predict the next byte. A window score uses only its selected context length. The report includes input bytes, target count, full BPB, common-target count, common BPB, and each requested window score.
 
-Common scores use target offsets at or above the largest requested window. If no common targets remain, common BPB and window deltas are null. The scorer saves and restores internal state and RTU traces, after success or error. It does not update weights or draw random samples. The optional JSON file contains the printed score values. The command does not alter the checkpoint.
+Common scores use target offsets at or above the largest requested window. If no common targets remain, common BPB and window deltas are null. The scorer snapshots and restores block state and temporal traces after success or error. It does not update weights or draw random samples. The optional JSON file contains the printed score values. The command does not alter the checkpoint.
 
 ## benchmark
 
@@ -285,6 +361,9 @@ The fixed suite uses 393 input bytes in three documents and context windows of 1
 The loader ignores blank lines and preserves sentence whitespace. TSV row numbers include blank lines.
 
 The split is contiguous. Values below 0 or above 1 are clipped to that range. The model weights stay frozen, and only a separate linear classification head receives updates. The command reports train and held-out confusion counts with MCC multiplied by 100. The score range is -100 to 100.
+
+RTU uses recurrent-state features. Other blocks use final-output features by default.
+The benchmark reports `feature_convention` as `recurrent-state` or `final-output` with the CoLA scores.
 
 The benchmark prints results to the terminal. It does not save a report or checkpoint. A missing supplied TSV raises an ordinary file error.
 

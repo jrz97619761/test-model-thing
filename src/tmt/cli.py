@@ -64,6 +64,7 @@ def _validate_metadata(raw):
 
 def _validate_model_settings(settings, label):
     from tmt.main import Model
+    from tmt.blocks import BLOCKS
     parameters = inspect.signature(Model).parameters
     if not isinstance(settings, dict):
         raise ValueError(f'{label} must be an object')
@@ -73,6 +74,10 @@ def _validate_model_settings(settings, label):
         raise ValueError(f'{label} is missing field {missing[0]!r}')
     if extra:
         raise ValueError(f'{label} has unknown field {extra[0]!r}')
+
+    if not isinstance(settings['block'], str) or settings['block'] not in BLOCKS:
+        choices = ', '.join(BLOCKS)
+        raise ValueError(f'{label}.block must be one of: {choices}')
 
     for name in ('dim', 'layers', 'spread'):
         if type(settings[name]) is not int or settings[name] <= 0:
@@ -285,9 +290,7 @@ def _training_sample(model, prompt, count, seed):
     _validate_seed(seed, 'sample-seed')
     import mlx.core as mx
 
-    fields = ('states', 'decaytrace', 'embedtrace')
-    snapshot = [[mx.array(getattr(block, field)) for field in fields] for block in model.blocks]
-    mx.eval(*(value for saved in snapshot for value in saved))
+    snapshot = model.snapshot_state()
     try:
         model.reset()
         for byte in prompt.encode('utf-8'):
@@ -299,13 +302,11 @@ def _training_sample(model, prompt, count, seed):
             byte = int(model.sample(logits, key=sample_key).item())
             generated.append(byte)
             _, (logits, _) = model.step(mx.array(byte), frozen=True)
-        mx.eval(*(block.states for block in model.blocks))
+        model.eval_state()
         return bytes(generated)
     finally:
-        for block, saved in zip(model.blocks, snapshot):
-            for field, value in zip(fields, saved):
-                setattr(block, field, value)
-        mx.eval(*(value for saved in snapshot for value in saved))
+        model.restore_state(snapshot)
+        model.eval_state()
 
 
 def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=False,
@@ -337,6 +338,8 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
     metrics = manifest_dir / 'loss.jsonl'
     record = {
         'config': settings,
+        'trainable_parameters': model.count(),
+        'temporal_gradient': model.temporal_gradient,
         'seed': seed,
         'data_glob': pattern,
         'data_files': [str(Path(filename).resolve()) for filename in files],
@@ -359,7 +362,7 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
     }
     def consume(byte):
         model.step(mx.array(byte), frozen=True)
-        mx.eval(*[layer.states for layer in model.blocks])
+        model.eval_state()
 
     def save():
         save_checkpoint(checkpoint, model, settings)
@@ -622,6 +625,8 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
             row = {
                 'run': index,
                 'settings': run_settings,
+                'trainable_parameters': model.count(),
+                'temporal_gradient': model.temporal_gradient,
                 'seed': run_seed,
                 'updates': updates,
                 'objective': 'ce_only' if ce_only else 'tmt',
@@ -654,8 +659,9 @@ def init_config(path=None):
     settings = load_config()
     templates = {path: settings} if path is not None else {
         'model.json': settings,
-        'grid.json': {'dim': [4, 8], 'layers': [1], 'spread': [4], 'seed': [11, 22]},
+        'grid.json': {'dim': [4, 8], 'layers': [1], 'spread': [4], 'block': ['rtu'], 'seed': [11, 22]},
         'run.example.json': {'config': settings, 'seed': 11,
+                             'trainable_parameters': None, 'temporal_gradient': None,
                              'data_glob': 'data/train/*', 'data_files': [],
                              'updates': 1000, 'log_every': 100, 'objective': 'tmt', 'completed_updates': 0,
                              'resume': False, 'initial_optimizer_step': 0, 'started_at': None,
