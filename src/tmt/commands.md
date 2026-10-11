@@ -1,5 +1,5 @@
 # TMT command manual
-This manual describes the installed `tmt` command. Use Python 3.12 or 3.13 and install the package with pip. Commands that create a model or use a checkpoint need MLX. Manual requests need no MLX, model, config, data, or checkpoint. Use `-h` or `--help` for the command index or one topic. Use `--version` for package details.
+This manual describes the installed `tmt` command. Use Python 3.12, 3.13, or 3.14 and install the package with pip. Commands that create a model or use a checkpoint need MLX. Manual requests need no MLX, model, config, data, or checkpoint. Use `-h` or `--help` for the command index or one topic. Use `--version` for package details.
 
 File errors and invalid values print a short error to stderr and exit with code `1`. Argument errors exit with code `2`.
 

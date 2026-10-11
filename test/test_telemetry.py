@@ -2,321 +2,298 @@ import contextlib
 import json
 import random
 import tempfile
-import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 
-class TrainingTelemetryTests(unittest.TestCase):
-    def _tiny_settings(self):
-        from tmt.cli import load_config
 
-        settings = load_config()
-        settings.update(dim=4, layers=1, spread=4)
-        return settings
+def _tiny_settings():
+    from tmt.cli import load_config
 
-    def _model_snapshot(self, model):
-        import mlx.core as mx
-        import mlx.utils as util
+    settings = load_config()
+    settings.update(dim=4, layers=1, spread=4)
+    return settings
 
-        snapshot = {
-            'parameters': {
-                name: mx.array(value)
-                for name, value in util.tree_flatten(model.trainable_parameters())
-            },
-            'optimizer': {
-                name: mx.array(value)
-                for name, value in util.tree_flatten(model.optimizer.state)
-            },
-            'recurrent': [
-                {
-                    name: mx.array(getattr(layer, name))
-                    for name in ('states', 'decaytrace', 'embedtrace')
-                }
-                for layer in model.blocks
-            ],
-        }
-        mx.eval(*snapshot['parameters'].values(), *snapshot['optimizer'].values())
-        mx.eval(*(value for layer in snapshot['recurrent'] for value in layer.values()))
-        return snapshot
 
-    def _assert_model_snapshot(self, model, snapshot):
-        import mlx.core as mx
-        import mlx.utils as util
+def _model_snapshot(model):
+    import mlx.core as mx
+    import mlx.utils as util
 
-        parameters = dict(util.tree_flatten(model.trainable_parameters()))
-        optimizer = dict(util.tree_flatten(model.optimizer.state))
-        mx.eval(*parameters.values(), *optimizer.values())
-        self.assertEqual(parameters.keys(), snapshot['parameters'].keys())
-        self.assertEqual(optimizer.keys(), snapshot['optimizer'].keys())
-        self.assertTrue(all(
-            mx.array_equal(value, parameters[name]).item()
-            for name, value in snapshot['parameters'].items()
-        ))
-        self.assertTrue(all(
-            mx.array_equal(value, optimizer[name]).item()
-            for name, value in snapshot['optimizer'].items()
-        ))
-        for layer, saved in zip(model.blocks, snapshot['recurrent']):
-            mx.eval(*(getattr(layer, name) for name in saved))
-            self.assertTrue(all(
-                mx.array_equal(value, getattr(layer, name)).item()
-                for name, value in saved.items()
-            ))
+    snapshot = {
+        'parameters': {
+            name: mx.array(value)
+            for name, value in util.tree_flatten(model.trainable_parameters())
+        },
+        'optimizer': {
+            name: mx.array(value)
+            for name, value in util.tree_flatten(model.optimizer.state)
+        },
+        'recurrent': [
+            {
+                name: mx.array(getattr(layer, name))
+                for name in ('states', 'decaytrace', 'embedtrace')
+            }
+            for layer in model.blocks
+        ],
+    }
+    mx.eval(*snapshot['parameters'].values(), *snapshot['optimizer'].values())
+    mx.eval(*(value for layer in snapshot['recurrent'] for value in layer.values()))
+    return snapshot
 
-    def _trained_model(self):
-        import mlx.core as mx
-        from tmt.main import Model
 
-        random.seed(11)
-        mx.random.seed(11)
-        model = Model(dim=4, layers=1, spread=4)
-        model.train_step(65, 66, False, True)
-        model.train_step(66, 67, True, True)
-        self.assertIsNotNone(model.compiled)
-        return model
+def _assert_model_snapshot(model, snapshot):
+    import mlx.core as mx
+    import mlx.utils as util
 
-    def _next_global_random_value(self, mx):
-        value = mx.random.uniform(shape=(1,))
-        mx.eval(value)
-        return value
+    parameters = dict(util.tree_flatten(model.trainable_parameters()))
+    optimizer = dict(util.tree_flatten(model.optimizer.state))
+    mx.eval(*parameters.values(), *optimizer.values())
+    assert parameters.keys() == snapshot['parameters'].keys()
+    assert optimizer.keys() == snapshot['optimizer'].keys()
+    assert all((mx.array_equal(value, parameters[name]).item() for name, value in snapshot['parameters'].items()))
+    assert all((mx.array_equal(value, optimizer[name]).item() for name, value in snapshot['optimizer'].items()))
+    for layer, saved in zip(model.blocks, snapshot['recurrent']):
+        mx.eval(*(getattr(layer, name) for name in saved))
+        assert all((mx.array_equal(value, getattr(layer, name)).item() for name, value in saved.items()))
 
-    def test_training_sample_is_seeded_and_restores_model_and_global_rng(self):
-        import mlx.core as mx
-        from tmt.cli import _training_sample
 
-        model = self._trained_model()
-        before = self._model_snapshot(model)
-        mx.random.seed(817)
-        expected_next = self._next_global_random_value(mx)
-        mx.random.seed(817)
+def _trained_model():
+    import mlx.core as mx
+    from tmt.main import Model
 
-        with patch.object(model, 'sample', wraps=model.sample) as sample:
-            first = _training_sample(model, 'The ', 5, 31)
-        actual_next = self._next_global_random_value(mx)
+    random.seed(11)
+    mx.random.seed(11)
+    model = Model(dim=4, layers=1, spread=4)
+    model.train_step(65, 66, False, True)
+    model.train_step(66, 67, True, True)
+    assert model.compiled is not None
+    return model
 
-        self.assertIsInstance(first, bytes)
-        self.assertEqual(len(first), 5)
-        self.assertTrue(mx.array_equal(expected_next, actual_next).item())
-        self._assert_model_snapshot(model, before)
-        self.assertGreater(sample.call_count, 0)
-        for call in sample.call_args_list:
-            self.assertTrue(call.kwargs.get('key') is not None or len(call.args) >= 2,
-                            'training sample must pass an explicit MLX random key')
 
-        # Sampling starts from a reset model, so prior recurrent state does not
-        # change the generated bytes. The helper must restore that state after use.
-        model.reset()
-        reset_snapshot = self._model_snapshot(model)
-        second = _training_sample(model, 'The ', 5, 31)
-        self.assertEqual(first, second)
-        self._assert_model_snapshot(model, reset_snapshot)
+def _next_global_random_value(mx):
+    value = mx.random.uniform(shape=(1,))
+    mx.eval(value)
+    return value
 
-    def test_training_sample_restores_model_and_global_rng_when_sampling_fails(self):
-        import mlx.core as mx
-        from tmt.cli import _training_sample
 
-        model = self._trained_model()
-        before = self._model_snapshot(model)
-        mx.random.seed(991)
-        expected_next = self._next_global_random_value(mx)
-        mx.random.seed(991)
+def test_training_sample_is_seeded_and_restores_model_and_global_rng():
+    import mlx.core as mx
+    from tmt.cli import _training_sample
 
-        with patch.object(model, 'sample', side_effect=RuntimeError('injected sampling failure')):
-            with self.assertRaisesRegex(RuntimeError, 'injected sampling failure'):
-                _training_sample(model, 'A prompt', 4, 7)
+    model = _trained_model()
+    before = _model_snapshot(model)
+    mx.random.seed(817)
+    expected_next = _next_global_random_value(mx)
+    mx.random.seed(817)
 
-        actual_next = self._next_global_random_value(mx)
-        self.assertTrue(mx.array_equal(expected_next, actual_next).item())
-        self._assert_model_snapshot(model, before)
+    with patch.object(model, 'sample', wraps=model.sample) as sample:
+        first = _training_sample(model, 'The ', 5, 31)
+    actual_next = _next_global_random_value(mx)
 
-    def test_sampling_does_not_change_training_updates_and_resume_uses_global_step(self):
-        import mlx.core as mx
-        from tmt.cli import train
+    assert isinstance(first, bytes)
+    assert len(first) == 5
+    assert mx.array_equal(expected_next, actual_next).item()
+    _assert_model_snapshot(model, before)
+    assert sample.call_count > 0
+    for call in sample.call_args_list:
+        assert call.kwargs.get('key') is not None or len(call.args) >= 2, 'training sample must pass an explicit MLX random key'
 
-        settings = self._tiny_settings()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            data = root / 'train.bin'
-            data.write_bytes(b'abcdefghij')
-            sampled_checkpoint = root / 'sampled' / 'model.safetensors'
-            plain_checkpoint = root / 'plain' / 'model.safetensors'
+    # Sampling starts from a reset model, so prior recurrent state does not
+    # change the generated bytes. The helper must restore that state after use.
+    model.reset()
+    reset_snapshot = _model_snapshot(model)
+    second = _training_sample(model, 'The ', 5, 31)
+    assert first == second
+    _assert_model_snapshot(model, reset_snapshot)
 
-            with (Path(directory) / 'stdout.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
-                sampled = train(
-                    settings, sampled_checkpoint, str(data), 4, seed=29, ce_only=True,
-                    log_every=4, sample_every=2, sample_prompt='The ',
-                    sample_seed=13, sample_bytes=3,
-                )
-                plain = train(
-                    settings, plain_checkpoint, str(data), 4, seed=29, ce_only=True,
-                    log_every=4,
-                )
 
-            self.assertIsNotNone(sampled.compiled)
-            self.assertIsNotNone(plain.compiled)
-            sampled_state = self._model_snapshot(sampled)
-            plain_state = self._model_snapshot(plain)
-            self.assertEqual(sampled_state['parameters'].keys(), plain_state['parameters'].keys())
-            self.assertEqual(sampled_state['optimizer'].keys(), plain_state['optimizer'].keys())
-            for group in ('parameters', 'optimizer'):
-                self.assertTrue(all(
-                    mx.array_equal(value, plain_state[group][name]).item()
-                    for name, value in sampled_state[group].items()
-                ))
-            for sample_layer, plain_layer in zip(sampled_state['recurrent'], plain_state['recurrent']):
-                self.assertTrue(all(
-                    mx.array_equal(value, plain_layer[name]).item()
-                    for name, value in sample_layer.items()
-                ))
+def test_training_sample_restores_model_and_global_rng_when_sampling_fails():
+    import mlx.core as mx
+    from tmt.cli import _training_sample
 
-            samples_path = sampled_checkpoint.parent / 'manifest' / 'samples.jsonl'
-            rows = [json.loads(line) for line in samples_path.read_text().splitlines()]
-            self.assertEqual([row['completed_updates'] for row in rows], [2, 4])
-            for row in rows:
-                self.assertEqual(row['optimizer_step'], row['completed_updates'])
-                self.assertEqual((row['prompt'], row['seed'], row['bytes']), ('The ', 13, 3))
-                sample_path = Path(row['path'])
-                if not sample_path.is_absolute():
-                    candidates = (sampled_checkpoint.parent / sample_path, root / sample_path)
-                    sample_path = next((path for path in candidates if path.exists()), candidates[0])
-                self.assertTrue(sample_path.is_file())
-                self.assertEqual(len(sample_path.read_bytes()), row['bytes'])
+    model = _trained_model()
+    before = _model_snapshot(model)
+    mx.random.seed(991)
+    expected_next = _next_global_random_value(mx)
+    mx.random.seed(991)
 
-            with (Path(directory) / 'resume.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
-                resumed = train(
-                    None, sampled_checkpoint, str(data), 2, seed=29, ce_only=True,
-                    resume=True, log_every=2, sample_every=1, sample_prompt='The ',
-                    sample_seed=13, sample_bytes=2,
-                )
-            self.assertEqual(int(resumed.optimizer.state['step'].item()), 6)
-            resumed_rows = [json.loads(line) for line in samples_path.read_text().splitlines()]
-            self.assertEqual(
-                [(row['completed_updates'], row['optimizer_step']) for row in resumed_rows],
-                [(1, 5), (2, 6)],
+    with patch.object(model, 'sample', side_effect=RuntimeError('injected sampling failure')):
+        with pytest.raises(RuntimeError, match='injected sampling failure'):
+            _training_sample(model, 'A prompt', 4, 7)
+
+    actual_next = _next_global_random_value(mx)
+    assert mx.array_equal(expected_next, actual_next).item()
+    _assert_model_snapshot(model, before)
+
+
+def test_sampling_does_not_change_training_updates_and_resume_uses_global_step():
+    import mlx.core as mx
+    from tmt.cli import train
+
+    settings = _tiny_settings()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        data = root / 'train.bin'
+        data.write_bytes(b'abcdefghij')
+        sampled_checkpoint = root / 'sampled' / 'model.safetensors'
+        plain_checkpoint = root / 'plain' / 'model.safetensors'
+
+        with (Path(directory) / 'stdout.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
+            sampled = train(
+                settings, sampled_checkpoint, str(data), 4, seed=29, ce_only=True,
+                log_every=4, sample_every=2, sample_prompt='The ',
+                sample_seed=13, sample_bytes=3,
+            )
+            plain = train(
+                settings, plain_checkpoint, str(data), 4, seed=29, ce_only=True,
+                log_every=4,
             )
 
-    def test_evaluation_intervals_use_global_byte_budget_and_preserve_training(self):
-        from tmt.benchmark import evaluate
-        from tmt.cli import documents, train
+        assert sampled.compiled is not None
+        assert plain.compiled is not None
+        sampled_state = _model_snapshot(sampled)
+        plain_state = _model_snapshot(plain)
+        assert sampled_state['parameters'].keys() == plain_state['parameters'].keys()
+        assert sampled_state['optimizer'].keys() == plain_state['optimizer'].keys()
+        for group in ('parameters', 'optimizer'):
+            assert all((mx.array_equal(value, plain_state[group][name]).item() for name, value in sampled_state[group].items()))
+        for sample_layer, plain_layer in zip(sampled_state['recurrent'], plain_state['recurrent']):
+            assert all((mx.array_equal(value, plain_layer[name]).item() for name, value in sample_layer.items()))
 
-        settings = self._tiny_settings()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            training_data = root / 'training.bin'
-            training_data.write_bytes(b'abcdefghij')
-            development = root / 'development'
-            development.mkdir()
-            first = development / 'a.bin'
-            second = development / 'b.bin'
-            first.write_bytes(b'abcd')
-            second.write_bytes(b'uvwxyz')
-            evaluation_pattern = str(development / '*.bin')
-            training_pattern = str(training_data)
-            monitored_checkpoint = root / 'monitored' / 'model.safetensors'
-            plain_checkpoint = root / 'plain' / 'model.safetensors'
+        samples_path = sampled_checkpoint.parent / 'manifest' / 'samples.jsonl'
+        rows = [json.loads(line) for line in samples_path.read_text().splitlines()]
+        assert [row['completed_updates'] for row in rows] == [2, 4]
+        for row in rows:
+            assert row['optimizer_step'] == row['completed_updates']
+            assert (row['prompt'], row['seed'], row['bytes']) == ('The ', 13, 3)
+            sample_path = Path(row['path'])
+            if not sample_path.is_absolute():
+                candidates = (sampled_checkpoint.parent / sample_path, root / sample_path)
+                sample_path = next((path for path in candidates if path.exists()), candidates[0])
+            assert sample_path.is_file()
+            assert len(sample_path.read_bytes()) == row['bytes']
 
-            with (root / 'monitored.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
-                monitored = train(
-                    settings, monitored_checkpoint, training_pattern, 5, seed=43,
-                    ce_only=True, log_every=5, eval_data=evaluation_pattern,
-                    eval_every=2, eval_max_bytes=7,
-                )
-            with (root / 'plain.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
-                plain = train(
-                    settings, plain_checkpoint, training_pattern, 5, seed=43,
-                    ce_only=True, log_every=5,
-                )
+        with (Path(directory) / 'resume.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
+            resumed = train(
+                None, sampled_checkpoint, str(data), 2, seed=29, ce_only=True,
+                resume=True, log_every=2, sample_every=1, sample_prompt='The ',
+                sample_seed=13, sample_bytes=2,
+            )
+        assert int(resumed.optimizer.state['step'].item()) == 6
+        resumed_rows = [json.loads(line) for line in samples_path.read_text().splitlines()]
+        assert [(row['completed_updates'], row['optimizer_step']) for row in resumed_rows] == [(1, 5), (2, 6)]
 
-            self.assertIsNotNone(monitored.compiled)
-            self.assertIsNotNone(plain.compiled)
-            monitored_snapshot = self._model_snapshot(monitored)
-            self._assert_model_snapshot(plain, monitored_snapshot)
 
-            evaluation_path = monitored_checkpoint.parent / 'manifest' / 'evaluation.jsonl'
-            rows = [json.loads(line) for line in evaluation_path.read_text().splitlines()]
-            self.assertEqual([row['completed_updates'] for row in rows], [2, 4, 5])
-            self.assertEqual(len({row['completed_updates'] for row in rows}), len(rows))
-            self.assertTrue(all(
-                row['optimizer_step'] == row['completed_updates'] for row in rows
-            ))
-            for row in rows:
-                self.assertEqual(row['input_bytes'], 7)
-                self.assertEqual(row['targets'], 5)
-                self.assertEqual(row['windows'], [])
+def test_evaluation_intervals_use_global_byte_budget_and_preserve_training(assert_almost_equal):
+    from tmt.benchmark import evaluate
+    from tmt.cli import documents, train
 
-            manifest = json.loads((monitored_checkpoint.parent / 'manifest' / 'run.json').read_text())
-            self.assertEqual(manifest['evaluation'], {
-                'every': 2,
-                'data_glob': evaluation_pattern,
-                'max_bytes': 7,
-                'data_files': [str(first.resolve()), str(second.resolve())],
+    settings = _tiny_settings()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        training_data = root / 'training.bin'
+        training_data.write_bytes(b'abcdefghij')
+        development = root / 'development'
+        development.mkdir()
+        first = development / 'a.bin'
+        second = development / 'b.bin'
+        first.write_bytes(b'abcd')
+        second.write_bytes(b'uvwxyz')
+        evaluation_pattern = str(development / '*.bin')
+        training_pattern = str(training_data)
+        monitored_checkpoint = root / 'monitored' / 'model.safetensors'
+        plain_checkpoint = root / 'plain' / 'model.safetensors'
+
+        with (root / 'monitored.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
+            monitored = train(
+                settings, monitored_checkpoint, training_pattern, 5, seed=43,
+                ce_only=True, log_every=5, eval_data=evaluation_pattern,
+                eval_every=2, eval_max_bytes=7,
+            )
+        with (root / 'plain.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
+            plain = train(
+                settings, plain_checkpoint, training_pattern, 5, seed=43,
+                ce_only=True, log_every=5,
+            )
+
+        assert monitored.compiled is not None
+        assert plain.compiled is not None
+        monitored_snapshot = _model_snapshot(monitored)
+        _assert_model_snapshot(plain, monitored_snapshot)
+
+        evaluation_path = monitored_checkpoint.parent / 'manifest' / 'evaluation.jsonl'
+        rows = [json.loads(line) for line in evaluation_path.read_text().splitlines()]
+        assert [row['completed_updates'] for row in rows] == [2, 4, 5]
+        assert len({row['completed_updates'] for row in rows}) == len(rows)
+        assert all((row['optimizer_step'] == row['completed_updates'] for row in rows))
+        for row in rows:
+            assert row['input_bytes'] == 7
+            assert row['targets'] == 5
+            assert row['windows'] == []
+
+        manifest = json.loads((monitored_checkpoint.parent / 'manifest' / 'run.json').read_text())
+        assert manifest['evaluation'] == {'every': 2, 'data_glob': evaluation_pattern, 'max_bytes': 7, 'data_files': [str(first.resolve()), str(second.resolve())]}
+        development_documents = list(documents(evaluation_pattern, 7))
+        assert development_documents == [b'abcd', b'uvw']
+        final_score = evaluate(monitored, development_documents)
+        assert_almost_equal(rows[-1]['bpb'], final_score['bpb'], places=12)
+
+        # An interval that lands on the final update must not add a second
+        # evaluation row for the same completed update.
+        exact_checkpoint = root / 'exact' / 'model.safetensors'
+        with (root / 'exact.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
+            train(
+                settings, exact_checkpoint, training_pattern, 4, seed=43,
+                ce_only=True, log_every=4, eval_data=evaluation_pattern,
+                eval_every=2, eval_max_bytes=7,
+            )
+        exact_rows = [json.loads(line) for line in
+                      (exact_checkpoint.parent / 'manifest' / 'evaluation.jsonl').read_text().splitlines()]
+        assert [row['completed_updates'] for row in exact_rows] == [2, 4]
+        assert len({row['completed_updates'] for row in exact_rows}) == len(exact_rows)
+
+
+def test_training_loss_artifact_records_interval_component_means(assert_almost_equal):
+    from tmt.cli import train
+    from tmt.main import Model
+
+    settings = _tiny_settings()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        data = root / 'train.bin'
+        data.write_bytes(b'abcdefg')
+        checkpoint = root / 'run' / 'model.safetensors'
+        per_update = []
+        original = Model.train_step
+
+        def capture(model, *args, metrics=None, **kwargs):
+            result = original(model, *args, metrics=metrics, **kwargs)
+            per_update.append({
+                'loss': float(result[2].item()),
+                'components': dict(metrics),
             })
-            development_documents = list(documents(evaluation_pattern, 7))
-            self.assertEqual(development_documents, [b'abcd', b'uvw'])
-            final_score = evaluate(monitored, development_documents)
-            self.assertAlmostEqual(rows[-1]['bpb'], final_score['bpb'], places=12)
+            return result
 
-            # An interval that lands on the final update must not add a second
-            # evaluation row for the same completed update.
-            exact_checkpoint = root / 'exact' / 'model.safetensors'
-            with (root / 'exact.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
-                train(
-                    settings, exact_checkpoint, training_pattern, 4, seed=43,
-                    ce_only=True, log_every=4, eval_data=evaluation_pattern,
-                    eval_every=2, eval_max_bytes=7,
-                )
-            exact_rows = [json.loads(line) for line in
-                          (exact_checkpoint.parent / 'manifest' / 'evaluation.jsonl').read_text().splitlines()]
-            self.assertEqual([row['completed_updates'] for row in exact_rows], [2, 4])
-            self.assertEqual(len({row['completed_updates'] for row in exact_rows}), len(exact_rows))
+        with patch.object(Model, 'train_step', capture):
+            with (root / 'train.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
+                train(settings, checkpoint, str(data), 5, seed=37, log_every=2)
 
-    def test_training_loss_artifact_records_interval_component_means(self):
-        from tmt.cli import train
-        from tmt.main import Model
-
-        settings = self._tiny_settings()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            data = root / 'train.bin'
-            data.write_bytes(b'abcdefg')
-            checkpoint = root / 'run' / 'model.safetensors'
-            per_update = []
-            original = Model.train_step
-
-            def capture(model, *args, metrics=None, **kwargs):
-                result = original(model, *args, metrics=metrics, **kwargs)
-                per_update.append({
-                    'loss': float(result[2].item()),
-                    'components': dict(metrics),
-                })
-                return result
-
-            with patch.object(Model, 'train_step', capture):
-                with (root / 'train.log').open('w') as stdout, contextlib.redirect_stdout(stdout):
-                    train(settings, checkpoint, str(data), 5, seed=37, log_every=2)
-
-            rows = [json.loads(line) for line in
-                    (checkpoint.parent / 'manifest' / 'loss.jsonl').read_text().splitlines()]
-            self.assertEqual([row['completed_updates'] for row in rows], [2, 4, 5])
-            component_names = {'variance', 'latent_prediction', 'cross_entropy', 'stop'}
-            start = 0
-            for row in rows:
-                stop = row['completed_updates']
-                interval = per_update[start:stop]
-                self.assertEqual(row['interval_updates'], len(interval))
-                self.assertEqual(set(row['mean_loss_components']), component_names)
-                expected_mean_loss = sum(item['loss'] for item in interval) / len(interval)
-                self.assertAlmostEqual(row['mean_loss'], expected_mean_loss, places=7)
-                self.assertEqual(row['loss'], interval[-1]['loss'])
-                for name in component_names:
-                    expected_component = sum(item['components'][name] for item in interval) / len(interval)
-                    self.assertAlmostEqual(row['mean_loss_components'][name], expected_component, places=7)
-                self.assertAlmostEqual(
-                    sum(row['mean_loss_components'].values()), row['mean_loss'], places=5,
-                )
-                start = stop
-
-
-if __name__ == '__main__':
-    unittest.main()
+        rows = [json.loads(line) for line in
+                (checkpoint.parent / 'manifest' / 'loss.jsonl').read_text().splitlines()]
+        assert [row['completed_updates'] for row in rows] == [2, 4, 5]
+        component_names = {'variance', 'latent_prediction', 'cross_entropy', 'stop'}
+        start = 0
+        for row in rows:
+            stop = row['completed_updates']
+            interval = per_update[start:stop]
+            assert row['interval_updates'] == len(interval)
+            assert set(row['mean_loss_components']) == component_names
+            expected_mean_loss = sum(item['loss'] for item in interval) / len(interval)
+            assert_almost_equal(row['mean_loss'], expected_mean_loss, places=7)
+            assert row['loss'] == interval[-1]['loss']
+            for name in component_names:
+                expected_component = sum(item['components'][name] for item in interval) / len(interval)
+                assert_almost_equal(row['mean_loss_components'][name], expected_component, places=7)
+            assert_almost_equal(sum(row['mean_loss_components'].values()), row['mean_loss'], places=5)
+            start = stop

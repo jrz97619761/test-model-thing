@@ -6,10 +6,11 @@ Command sections: [init](src/tmt/commands.md#init), [train](src/tmt/commands.md#
 
 ## Installation and PATH
 
-Use Python 3.12 or 3.13. Model commands and `init` require a functional MLX runtime.
+Use Python 3.12, 3.13, or 3.14. Model commands and `init` require a functional MLX runtime.
 From the repository root, install the package:
 
 ```bash
+# Use python3.12, python3.13, or python3.14.
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
@@ -19,9 +20,9 @@ python -m tmt --help
 ```
 
 This regular installation copies the package into the virtual environment.
-For development, use `python -m pip install -e .` instead.
+For development and tests, use `python -m pip install -e '.[test]'` instead.
 After source edits, repeat a regular installation before you verify those edits.
-Run the tests with `python -m unittest discover -s test -v`.
+Run the tests with `python -m pytest`.
 
 Activation adds `.venv/bin` to PATH for one terminal.
 For new terminals, you can add this optional line to your shell configuration:

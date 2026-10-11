@@ -34,10 +34,11 @@ Also below is some results from CoLA after training a model for ~30 minutes. GPT
 
 ## Install and train a model
 
-Use Python 3.12 or 3.13 and a functional MLX runtime.
+Use Python 3.12, 3.13, or 3.14 and a functional MLX runtime.
 From the checkout, create a virtual environment and install the CLI:
 
 ```bash
+# Use python3.12, python3.13, or python3.14.
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
@@ -45,7 +46,7 @@ tmt --version
 ```
 
 Activation adds `.venv/bin` to PATH for this terminal.
-Developers can use `python -m pip install -e .` so source edits take effect directly.
+Developers can use `python -m pip install -e '.[test]'` so source edits take effect directly and pytest is available.
 For an optional persistent PATH configuration, see [the CLI guide](CLI.md#installation-and-path).
 `python -m tmt` also runs the CLI.
 The version uses installed package metadata.

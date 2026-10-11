@@ -38,13 +38,14 @@ Do not rewrite these documents unless the task requires it.
 
 ## Environment and checks
 
-Use Python 3.12 or 3.13. Model commands and most tests require a functional MLX runtime.
+Use Python 3.12, 3.13, or 3.14. Model commands and most tests require a functional MLX runtime.
 Use an existing suitable virtual environment when available. Otherwise, create one at the repository root:
 
 ```sh
+# Use python3.12, python3.13, or python3.14.
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e .
+python -m pip install -e '.[test]'
 ```
 
 The source uses the `src/` layout. Install the package before checks.
@@ -54,12 +55,14 @@ After a regular installation, install again before you check source changes.
 Run these checks from the repository root for code changes:
 
 ```sh
-python -m unittest discover -s test -v
+python -m pytest
 python -m tmt --help
 python -m tmt --version
 ```
 
-- Use `unittest`, which the current tests use. Do not add a test framework without a task requirement.
+- Use `pytest` for tests. Keep test dependencies in the `test` extra.
+- For Python compatibility changes, run the checks in Python 3.12, 3.13, and 3.14 environments.
+- Run `python -m pip check` in each environment to check dependency conflicts.
 - Add regression tests for meaningful behavior changes. Cover relevant failure paths.
 - For documentation-only edits, check paths, commands, and claims against the source. Model runs are unnecessary.
 - For package changes, verify installed entry points and access to `commands.md` outside the checkout.
