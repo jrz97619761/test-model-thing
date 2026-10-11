@@ -15,10 +15,69 @@ The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, `bound`, and
 
 `block` must name a registered block. Boolean values are invalid for numeric fields. The CLI checks config values and sweep grid values before model creation or output creation.
 
+## Wheel distribution
+
+The project uses Setuptools to build wheels. It supports Python 3.12, 3.13, and 3.14.
+The `build` tool is a maintainer tool. It is not a runtime dependency of TMT.
+
+From the repository root, use an active virtual environment with a supported Python version.
+Install the build tool:
+
+```bash
+python -m pip install build
+```
+
+Build a wheel:
+
+```bash
+python scripts/build_wheel.py
+```
+
+This command creates `dist/test_model_thing-1.0.0-py3-none-any.whl` for the current project version.
+It uses an isolated build environment and the Setuptools requirement in `pyproject.toml`.
+It does not install TMT or publish files.
+After success or failure, the script removes `build/` and direct `src/*.egg-info` artifacts.
+It keeps `dist/`, `.venv/`, source code, and installed `.dist-info` metadata.
+Run this script when no other build or package installation uses the checkout.
+
+To remove those temporary artifacts without a build, use:
+
+```bash
+python scripts/build_wheel.py --clean-only
+```
+
+The cleanup command needs only Python. Run the script from the repository root, or supply its full path from another directory.
+
+Install that wheel in the target virtual environment:
+
+```bash
+python -m pip install dist/test_model_thing-1.0.0-py3-none-any.whl
+tmt --version
+tmt help
+```
+
+Use the wheel path that matches the project version. From another directory, supply the full path to the wheel.
+Pip installs the `mlx` dependency and creates the `tmt` command.
+The wheel contains the Python package, `commands.md`, and `.dist-info` metadata.
+The metadata supplies the version, dependencies, and command entry point.
+MLX needs a compatible runtime even though the TMT wheel contains only Python code and package resources.
+
+Setuptools can create `src/test_model_thing.egg-info` during a wheel build or an editable installation.
+This generated folder contains source metadata. It is not an `.egg` distribution.
+Git ignores this folder. The build script removes it after the build. Setuptools can recreate it after removal.
+
+Keep installed `.dist-info` metadata because pip and the version command use it.
+Use `python scripts/build_wheel.py` for distribution, not legacy egg commands such as `setup.py bdist_egg`.
+
+For local development, use `python -m pip install -e '.[test]'`.
+This editable installation uses source files directly and installs pytest.
+The normal `python -m pip install .` workflow also remains available.
+
 ## Blocks
 
 The `block` field selects one factory for every layer. The current package registers only `rtu`.
-The default config value is `"rtu"`. A custom block needs a local factory entry in `src/tmt/blocks.py`.
+Use `"block": "rtu"` for the default block, or replace `rtu` with a factory name from `src/tmt/blocks.py`.
+A custom block needs a local factory entry in `src/tmt/blocks.py`.
 
 The Python method `Model.step()` returns `((x, state_results, auxiliary_results), (logits, stop))`.
 `state_results` contains one dictionary per block, with keys from `state_fields`.
