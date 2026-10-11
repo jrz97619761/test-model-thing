@@ -334,6 +334,8 @@ tmt benchmark CHECKPOINT [--cola-data PATH] [--epochs N] [--split FRACTION] [--s
 python -m tmt.benchmark CHECKPOINT [--cola-data PATH] [--epochs N] [--split FRACTION] [--seed N]
 ```
 
+The module command uses the same CLI as `tmt benchmark`. Both commands return this section for `--help` without MLX.
+
 ### Requirements and options
 
 - `CHECKPOINT` is required and must pass strict model and optimizer tensor checks.

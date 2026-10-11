@@ -71,6 +71,37 @@ def test_help_index(model_free_cli, tmp_path, option):
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize('args,code', [
+    (['--help'], 0),
+    (['--version'], 2),
+    ([], 2),
+    (['missing.safetensors', '--unknown'], 2),
+    (['missing.safetensors', '--seed', '-1'], 1),
+])
+def test_benchmark_module_uses_main_cli(model_free_cli, tmp_path, args, code):
+    expected = model_free_cli('benchmark', *args)
+    result = model_free_cli(*args, module='tmt.benchmark')
+    assert (result.returncode, result.stdout, result.stderr) == (
+        expected.returncode, expected.stdout, expected.stderr,
+    )
+    assert result.returncode == code
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_benchmark_module_scores(saved_checkpoint, cli_runner, tmp_path):
+    import subprocess
+    import sys
+
+    checkpoint = saved_checkpoint[0]
+    expected = cli_runner('benchmark', str(checkpoint), success=True)
+    result = subprocess.run(
+        [sys.executable, '-m', 'tmt.benchmark', str(checkpoint)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=60,
+    )
+    assert (result.returncode, result.stdout, result.stderr) == (0, expected.stdout, expected.stderr)
+    assert '390 targets' in result.stdout
+
+
 @pytest.mark.parametrize('args', [
     ['help', 'nonexistent'], ['--help', 'nonexistent'],
     ['-h', 'nonexistent'], ['nonexistent', '--help'],

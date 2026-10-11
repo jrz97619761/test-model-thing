@@ -1,4 +1,10 @@
-import argparse
+# Keep the documented module command as an alias, before any MLX imports.
+if __name__ == '__main__':
+    import sys
+    from tmt.cli import main
+
+    raise SystemExit(main(['benchmark', *sys.argv[1:]]))
+
 import math
 
 import mlx.core as mx
@@ -242,19 +248,3 @@ def run(path: str, epochs: int = 1, split: float = 0.5, data: str | None = None,
         'feature_convention': model.blocks[-1].feature_convention,
         'epochs': epoch_scores,
     }
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description = 'CoLA benchmark for test-model-thing')
-
-    parser.add_argument('checkpoint')
-    parser.add_argument('--epochs', type=int, default=1)
-    parser.add_argument('--split', type=float, default=0.5)
-
-    parser.add_argument('--cola-data')
-    parser.add_argument('--seed', type=int, default=11)
-
-    args = parser.parse_args()
-    try:
-        run(args.checkpoint, args.epochs, args.split, args.cola_data, seed=args.seed)
-    except (OSError, ValueError) as error:
-        parser.exit(1, f'tmt: error: {error}\n')

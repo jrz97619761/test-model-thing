@@ -84,19 +84,19 @@ def model_free_cli(tmp_path):
     import sys
 
     script = """
-import builtins, runpy
+import builtins, runpy, sys
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
     if name in ('tmt.main', 'tmt.benchmark', 'mlx') or name.startswith('mlx.'):
         raise ImportError('model import forbidden')
     return original(name, *args, **kwargs)
 builtins.__import__ = guarded
-runpy.run_module('tmt', run_name='__main__', alter_sys=True)
+runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)
 """
 
-    def run(*args):
+    def run(*args, module='tmt'):
         return subprocess.run(
-            [sys.executable, '-c', script, *args], cwd=tmp_path,
+            [sys.executable, '-c', script, module, *args], cwd=tmp_path,
             capture_output=True, text=True, timeout=10,
         )
 
