@@ -28,9 +28,13 @@ Treat model quality claims as experimental results. Small fixtures verify behavi
 | `src/tmt/__main__.py` | Entry point for `python -m tmt` |
 | `src/tmt/commands.md` | Packaged command manual, also returned by `tmt help` |
 | `test/test_main.py` | Model arithmetic, gradient, recurrence, and state tests |
-| `test/test_cli.py` | CLI, checkpoint, evaluation, and installed workflow tests |
+| `test/test_cli.py` | CLI help, configuration, and installed workflow tests |
+| `test/test_cli_validation.py` | CLI input and failure tests |
+| `test/test_checkpoint.py` | Checkpoint validation and round-trip tests |
+| `test/test_training.py`, `test/test_telemetry.py` | Training and telemetry tests |
+| `test/test_evaluation.py`, `test/test_generation.py`, `test/test_sweep.py` | Evaluation, generation, and sweep tests |
+| `test/conftest.py` | Shared pytest fixtures |
 | `examples/` | Default model, tiny model, and sweep grid JSON files |
-| `CLI.md` | Installation, workspace workflow, and known limits |
 | `pyproject.toml` | Package metadata, console entry point, and packaged resources |
 
 `README.md` and `VISION.md` contain the author's project description and personal views. Preserve their voice.
@@ -103,7 +107,7 @@ python -m tmt --version
 
 ## Documentation and handoff
 
-- Update `src/tmt/commands.md` when CLI behavior changes. Check `CLI.md` and examples for affected instructions.
+- Update `src/tmt/commands.md` when CLI behavior changes. Check examples for affected instructions.
 - Keep `commands.md` in package data. Help must work outside the checkout.
 - Use plain, concise technical English. Apply the installed `simplified-technical-english` skill to technical prose when available.
 - Lead reviews with actionable defects, ordered by severity. Give file and line evidence.

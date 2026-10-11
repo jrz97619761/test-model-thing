@@ -47,7 +47,6 @@ tmt --version
 
 Activation adds `.venv/bin` to PATH for this terminal.
 Developers can use `python -m pip install -e '.[test]'` so source edits take effect directly and pytest is available.
-For an optional persistent PATH configuration, see [the CLI guide](CLI.md#installation-and-path).
 `python -m tmt` also runs the CLI.
 The version uses installed package metadata.
 
@@ -74,7 +73,6 @@ Resume uses checkpoint settings and adds updates with a new data pass. It does n
 
 The trainer saves every 500 updates and at normal completion. Ctrl-C does not save. Keep the last successful checkpoint.
 
-Read [the CLI guide](CLI.md) for workspace files, explicit checkpoint paths, sweeps, optional CoLA, and limits.
 Read the [command manual](src/tmt/commands.md) or use `tmt help`.
 Use [train](src/tmt/commands.md#train) for run and resume options.
 The tiny example checks commands. It does not establish model quality.

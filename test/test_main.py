@@ -4,10 +4,11 @@ import random
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
+
+import pytest
 
 
-def test_train_step():
+def test_import_has_no_actions():
     root = Path(__file__).resolve().parents[1]
     code = """
 import argparse, builtins
@@ -20,34 +21,36 @@ import tmt.main
     result = subprocess.run([sys.executable, '-c', code], cwd=root, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
-    import mlx.core as mx
-    from tmt.main import Model
 
-    random.seed(11)
-    mx.random.seed(11)
-    model = Model(dim=4, layers=1, spread=4, temp=0.75, rate=0.0005, bound=(40000, 120000))
+def test_train_step(monkeypatch, model_factory):
+    import mlx.core as mx
+
+    model = model_factory()
     mx.eval(model.parameters())
     mx.random.seed(23)
     expected = mx.random.uniform(shape=(1,)).item()
     mx.random.seed(23)
-    with patch.object(model, 'sample', side_effect=AssertionError('train_step sampled')):
-        output, stop, loss = model.train_step(97, 98, False)
-        assert (output.shape, stop.shape) == ((256,), (1,))
-        assert mx.random.uniform(shape=(1,)).item() == expected
-        assert float(loss.item()) == 7.2099761962890625
-        assert math.isfinite(float(loss.item()))
-        assert int(model.optimizer.state['step'].item()) == 1
+    def reject_sample(*args, **kwargs):
+        pytest.fail('train_step sampled')
 
-        mx.random.seed(29)
-        expected = mx.random.uniform(shape=(1,)).item()
-        mx.random.seed(29)
-        output, stop, loss = model.train_step(98, 99, True)
-        assert mx.random.uniform(shape=(1,)).item() == expected
-        assert math.isfinite(float(loss.item()))
-        assert int(model.optimizer.state['step'].item()) == 2
+    monkeypatch.setattr(model, 'sample', reject_sample)
+    output, stop, loss = model.train_step(97, 98, False)
+    assert (output.shape, stop.shape) == ((256,), (1,))
+    assert mx.random.uniform(shape=(1,)).item() == expected
+    assert float(loss.item()) == 7.2099761962890625
+    assert math.isfinite(float(loss.item()))
+    assert int(model.optimizer.state['step'].item()) == 1
+
+    mx.random.seed(29)
+    expected = mx.random.uniform(shape=(1,)).item()
+    mx.random.seed(29)
+    output, stop, loss = model.train_step(98, 99, True)
+    assert mx.random.uniform(shape=(1,)).item() == expected
+    assert math.isfinite(float(loss.item()))
+    assert int(model.optimizer.state['step'].item()) == 2
 
 
-def test_seeded_rtu_training_matches_reference():
+def test_rtu_baseline():
     import mlx.core as mx
     import mlx.utils as util
     from tmt.main import Model
@@ -146,16 +149,19 @@ def test_seeded_rtu_training_matches_reference():
     assert_reference(actual_updates, fixture['updates'])
 
 
-def test_byte_io_recurrence_and_reset():
+def test_byte_io(model_factory):
     import mlx.core as mx
-    from tmt.main import Model
-
-    model = Model(dim=4, layers=1, spread=4)
+    model = model_factory()
     mx.eval(model.parameters())
     encoded = model.encoder(mx.array([0, 255]))
     logits, stop = model.decoder(encoded)
     assert (encoded.shape, logits.shape, stop.shape) == ((2, 4), (2, 256), (2, 1))
 
+
+def test_recurrence(model_factory):
+    import mlx.core as mx
+
+    model = model_factory()
     model.reset()
     layer = model.blocks[0]
     byte = mx.array(65)
@@ -168,21 +174,25 @@ def test_byte_io_recurrence_and_reset():
     (_, second_states, _), _ = model.step(byte, frozen=True)
     assert mx.allclose(second_states[0]['states'], expected_state, atol=1e-06).item()
 
+
+@pytest.mark.parametrize('field', ['states', 'decaytrace', 'embedtrace'])
+def test_reset(model_factory, field):
+    import mlx.core as mx
+
+    model = model_factory()
+    layer = model.blocks[0]
     model.train_step(65, 66, False)
     mx.eval(layer.embedtrace)
     assert float(mx.sum(layer.embedtrace[65]).item()) > 0.0
     model.reset()
-    for layer in model.blocks:
-        assert float(mx.sum(mx.abs(layer.states)).item()) == 0.0
-        assert float(mx.sum(mx.abs(layer.decaytrace)).item()) == 0.0
-        assert float(mx.sum(mx.abs(layer.embedtrace)).item()) == 0.0
+    assert float(mx.sum(mx.abs(getattr(layer, field))).item()) == 0.0
 
 
-def test_loss_terms(assert_almost_equal):
+@pytest.fixture
+def loss_case(model_factory):
     import mlx.core as mx
-    from tmt.main import Model
 
-    model = Model(dim=4, layers=1, spread=4)
+    model = model_factory()
     x = [0.0, 0.5, 1.0, 1.5]
     output = mx.arange(256) * 0.001
     stop = mx.array([0.2])
@@ -198,24 +208,46 @@ def test_loss_terms(assert_almost_equal):
     logsumexp = maximum + math.log(sum(math.exp(value - maximum) for value in logits))
     cross_entropy = -logits[67] + logsumexp
     stop_value = float(stop.item())
-    full_end = variance_term + latent_term + cross_entropy + (stop_value - 1.0) ** 2
-    full_open = variance_term + latent_term + cross_entropy + stop_value ** 2
-    assert_almost_equal(float(model.loss(mx.array(x), output, stop, 67, True).item()), full_end, places=5)
-    assert_almost_equal(float(model.loss(mx.array(x), output, stop, 67, False).item()), full_open, places=5)
-    assert_almost_equal(float(model.loss(mx.array(x), output, stop, 67, False, True).item()), cross_entropy, places=5)
-    assert_almost_equal(float(model.loss(mx.array(x), output, stop, None, False).item()), variance_term, places=5)
-    assert float(model.loss(mx.array(x), output, stop, None, False, True)) == 0.0
+    terms = {
+        'variance': variance_term,
+        'latent_prediction': latent_term,
+        'cross_entropy': cross_entropy,
+        'stop': (stop_value - 1.0) ** 2,
+    }
+    return model, mx.array(x), output, stop, terms
+
+
+@pytest.mark.parametrize('target,end,ce_only', [
+    pytest.param(67, True, False, id='end'),
+    pytest.param(67, False, False, id='open'),
+    pytest.param(67, False, True, id='ce-only'),
+    pytest.param(None, False, False, id='no-target'),
+    pytest.param(None, False, True, id='ce-no-target'),
+])
+def test_loss(loss_case, target, end, ce_only):
+    model, x, output, stop, terms = loss_case
+    if target is None:
+        expected = 0.0 if ce_only else terms['variance']
+    elif ce_only:
+        expected = terms['cross_entropy']
+    else:
+        expected = sum(terms.values()) - terms['stop']
+        expected += (float(stop.item()) - float(end)) ** 2
+    actual = model.loss(x, output, stop, target, end, ce_only)
+    assert float(actual) == pytest.approx(expected, rel=0, abs=1e-5)
+
+
+@pytest.mark.parametrize('name', ['variance', 'latent_prediction', 'cross_entropy', 'stop'])
+@pytest.mark.parametrize('ce_only', [False, True], ids=['full', 'ce-only'])
+def test_loss_components(loss_case, name, ce_only):
+    model, x, output, stop, terms = loss_case
     components = {}
-    model.loss(mx.array(x), output, stop, 67, True, components=components)
-    for name, expected in (('variance', variance_term), ('latent_prediction', latent_term),
-                           ('cross_entropy', cross_entropy), ('stop', (stop_value - 1.0) ** 2)):
-        assert_almost_equal(float(components[name].item()), expected, places=5)
-    model.loss(mx.array(x), output, stop, 67, False, True, components)
-    assert_almost_equal(float(components['cross_entropy'].item()), cross_entropy, places=5)
-    assert all((float(components[name].item()) == 0.0 for name in ('variance', 'latent_prediction', 'stop')))
+    model.loss(x, output, stop, 67, True, ce_only, components)
+    expected = 0.0 if ce_only and name != 'cross_entropy' else terms[name]
+    assert float(components[name]) == pytest.approx(expected, rel=0, abs=1e-5)
 
 
-def test_rtu_traces_and_manual_gradients(assert_almost_equal):
+def test_rtu_gradients(monkeypatch, assert_almost_equal):
     import mlx.core as mx
     from tmt.main import Model
 
@@ -231,15 +263,15 @@ def test_rtu_traces_and_manual_gradients(assert_almost_equal):
         })
         mx.eval(*captured[-1].values())
 
-    with patch.object(model, 'updategrads', side_effect=capture):
-        model.train_step(65, 66, False, True)
-        layer = model.blocks[0]
-        previous_state = mx.array(layer.states)
-        previous_decaytrace = mx.array(layer.decaytrace)
-        previous_embedtrace = mx.array(layer.embedtrace)
-        decay = mx.sigmoid(layer.decay)
-        mx.eval(previous_state, previous_decaytrace, previous_embedtrace, decay)
-        model.train_step(66, 67, True, True)
+    monkeypatch.setattr(model, 'updategrads', capture)
+    model.train_step(65, 66, False, True)
+    layer = model.blocks[0]
+    previous_state = mx.array(layer.states)
+    previous_decaytrace = mx.array(layer.decaytrace)
+    previous_embedtrace = mx.array(layer.embedtrace)
+    decay = mx.sigmoid(layer.decay)
+    mx.eval(previous_state, previous_decaytrace, previous_embedtrace, decay)
+    model.train_step(66, 67, True, True)
 
     expected_decaytrace = decay * previous_decaytrace + decay * (1.0 - decay) * previous_state
     expected_embedtrace = previous_embedtrace * decay + (mx.arange(256) == 66)[:, None].astype(mx.float32)
@@ -273,7 +305,7 @@ def test_rtu_traces_and_manual_gradients(assert_almost_equal):
     assert_almost_equal(analytic_embed, numerical_embed, delta=0.002)
 
 
-def test_frozen_step_isolates_weights_and_optimizer():
+def test_frozen_step():
     import mlx.core as mx
     import mlx.utils as util
     from tmt.main import Model
