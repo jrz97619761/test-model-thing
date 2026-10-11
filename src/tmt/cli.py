@@ -11,6 +11,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import validation
+
+
 
 def load_config(path=None):
     from tmt.main import Model
@@ -31,12 +34,12 @@ def load_config(path=None):
         name: list(value) if isinstance(value, tuple) else value
         for name, value in settings.arguments.items()
     }
-    return _validate_model_settings(resolved, 'model config')
+    return validation.validate_model_settings(resolved, 'model config')
 
 
 def new_model(settings, seed):
-    _validate_seed(seed)
-    _validate_model_settings(settings, 'model config')
+    validation.validate_seed(seed)
+    validation.validate_model_settings(settings, 'model config')
     import random
     import mlx.core as mx
     from tmt.main import Model
@@ -46,82 +49,6 @@ def new_model(settings, seed):
     model = Model(**settings)
     mx.eval(model.parameters())
     return model
-
-
-def _validate_metadata(raw):
-    if not isinstance(raw, str):
-        raise ValueError("checkpoint __metadata__.tmt must be a string")
-    try:
-        value = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as error:
-        raise ValueError(f"checkpoint tmt metadata is invalid JSON: {error}") from error
-    if not isinstance(value, dict) or set(value) != {'version', 'model'}:
-        raise ValueError("checkpoint tmt metadata must contain exactly 'version' and 'model'")
-    if type(value['version']) is not int or value['version'] != 1:
-        raise ValueError('checkpoint.version must be integer 1')
-    return _validate_model_settings(value['model'], 'checkpoint.model')
-
-
-def _validate_model_settings(settings, label):
-    from tmt.main import Model
-    from tmt.blocks import BLOCKS
-    parameters = inspect.signature(Model).parameters
-    if not isinstance(settings, dict):
-        raise ValueError(f'{label} must be an object')
-    missing = sorted(set(parameters) - set(settings))
-    extra = sorted(set(settings) - set(parameters))
-    if missing:
-        raise ValueError(f'{label} is missing field {missing[0]!r}')
-    if extra:
-        raise ValueError(f'{label} has unknown field {extra[0]!r}')
-
-    if not isinstance(settings['block'], str) or settings['block'] not in BLOCKS:
-        choices = ', '.join(BLOCKS)
-        raise ValueError(f'{label}.block must be one of: {choices}')
-
-    for name in ('dim', 'layers', 'spread'):
-        if type(settings[name]) is not int or settings[name] <= 0:
-            raise ValueError(f'{label}.{name} must be a positive integer')
-    for name, minimum, strict in (('temp', 0, False), ('rate', 0, True)):
-        number = settings[name]
-        try:
-            finite = not isinstance(number, bool) and isinstance(number, (int, float)) and math.isfinite(number)
-        except OverflowError:
-            finite = False
-        if not finite or (number <= minimum if strict else number < minimum):
-            rule = 'a finite positive number' if strict else 'a finite nonnegative number'
-            raise ValueError(f'{label}.{name} must be {rule}')
-    bound = settings['bound']
-    if (not isinstance(bound, list) or len(bound) != 2
-            or any(type(value) is not int for value in bound)
-            or not 0 <= bound[0] < bound[1]):
-        raise ValueError(f'{label}.bound must be two integers with 0 <= start < end')
-
-    for name, item in settings.items():
-        try:
-            json.dumps(item, allow_nan=False)
-        except (TypeError, ValueError) as error:
-            raise ValueError(f'{label}.{name} must contain finite JSON values') from error
-
-    for name, parameter in parameters.items():
-        if name in {'dim', 'layers', 'spread', 'temp', 'rate', 'bound'}:
-            continue
-        default = parameter.default
-        if default is inspect.Parameter.empty:
-            continue
-        item = settings[name]
-        if isinstance(default, float):
-            try:
-                valid = not isinstance(item, bool) and isinstance(item, (int, float)) and math.isfinite(item)
-            except OverflowError:
-                valid = False
-        elif isinstance(default, tuple):
-            valid = isinstance(item, list)
-        else:
-            valid = type(item) is type(default)
-        if not valid:
-            raise ValueError(f'{label}.{name} has an invalid JSON type')
-    return settings
 
 
 def _read_header(path):
@@ -157,34 +84,13 @@ def _flatten(tree, prefix):
     return {f'{prefix}.{name}': value for name, value in util.tree_flatten(tree)}
 
 
-def _validate_arrays(actual, expected):
-    missing = sorted(set(expected) - set(actual))
-    extra = sorted(set(actual) - set(expected))
-    if missing:
-        raise ValueError(f'checkpoint is missing tensor {missing[0]!r}')
-    if extra:
-        raise ValueError(f'checkpoint has unexpected tensor {extra[0]!r}')
-    for name, template in expected.items():
-        array = actual[name]
-        label = 'model' if name.startswith('m.') else 'optimizer'
-        tensor = name[2:]
-        if tuple(array.shape) != tuple(template.shape):
-            raise ValueError(
-                f'{label} tensor {tensor!r} has shape {tuple(array.shape)}, expected {tuple(template.shape)}'
-            )
-        if array.dtype != template.dtype:
-            raise ValueError(
-                f'{label} tensor {tensor!r} has dtype {array.dtype}, expected {template.dtype}'
-            )
-
-
 def save_checkpoint(path, model, settings):
     import mlx.core as mx
 
     resolved = {name: list(value) if isinstance(value, tuple) else value
                 for name, value in settings.items()}
     raw = json.dumps({'version': 1, 'model': resolved})
-    _validate_metadata(raw)
+    validation.validate_metadata(raw)
     model.optimizer.init(model.trainable_parameters())
     tensors = _flatten(model.parameters(), 'm')
     tensors.update(_flatten(model.optimizer.state, 'o'))
@@ -193,12 +99,12 @@ def save_checkpoint(path, model, settings):
 
 
 def load_model(path, seed=11):
-    _validate_seed(seed)
+    validation.validate_seed(seed)
     import mlx.core as mx
     import mlx.utils as util
 
     envelope = _read_header(path)
-    settings = _validate_metadata(envelope['__metadata__']['tmt'])
+    settings = validation.validate_metadata(envelope['__metadata__']['tmt'])
     model = new_model(settings, seed)
     model.optimizer.init(model.trainable_parameters())
     expected = _flatten(model.parameters(), 'm')
@@ -207,7 +113,7 @@ def load_model(path, seed=11):
         tensors = mx.load(path)
     except Exception as error:
         raise ValueError(f'invalid checkpoint: {error}') from error
-    _validate_arrays(tensors, expected)
+    validation.validate_checkpoint_arrays(tensors, expected)
 
     parameters = {name[2:]: value for name, value in tensors.items() if name.startswith('m.')}
     optimizer = {name[2:]: value for name, value in tensors.items() if name.startswith('o.')}
@@ -249,45 +155,14 @@ def _write_manifest(path, record):
         file.write('\n')
 
 
-def _positive(value, name):
-    if value <= 0:
-        raise ValueError(f'{name} must be positive')
-
-
-def _validate_seed(value, name='seed'):
-    if type(value) is not int:
-        raise ValueError(f'{name} must be an integer')
-    if not 0 <= value < 2**64:
-        raise ValueError(f'{name} must be between 0 and {2**64 - 1}')
-
-
-def _validate_run_name(name):
-    if not name or name in ('.', '..') or any(char in name for char in ('/', '\\', '\0')):
-        raise ValueError('run must be one relative folder name')
-
-
 def _append_jsonl(path, row):
     with open(path, 'a') as file:
         file.write(json.dumps(row) + '\n')
 
 
-def _validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
-                         eval_every, eval_max_bytes):
-    _positive(sample_bytes, 'sample-bytes')
-    if not sample_prompt:
-        raise ValueError('sample-prompt must not be empty')
-    _positive(eval_max_bytes, 'eval-max-bytes')
-    if sample_every is not None:
-        _positive(sample_every, 'sample-every')
-    if (eval_data is None) != (eval_every is None):
-        raise ValueError('eval-data and eval-every must be used together')
-    if eval_every is not None:
-        _positive(eval_every, 'eval-every')
-
-
 def _training_sample(model, prompt, count, seed):
     """Sample with a local RNG key and restore recurrent state after any exit."""
-    _validate_seed(seed, 'sample-seed')
+    validation.validate_seed(seed, 'sample-seed')
     import mlx.core as mx
 
     snapshot = model.snapshot_state()
@@ -314,11 +189,8 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
           sample_bytes=256, eval_data=None, eval_every=None, eval_max_bytes=8192,
           *, new_run=False):
     """Train on adjacent raw-byte pairs and record the run manifest."""
-    _validate_seed(seed)
-    _validate_seed(sample_seed, 'sample-seed')
-    _positive(updates, 'updates')
-    _positive(log_every, 'log-every')
-    _validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
+    validation.validate_training_options(seed, sample_seed, updates, log_every)
+    validation.validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
                          eval_every, eval_max_bytes)
     import mlx.core as mx
 
@@ -487,9 +359,9 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
 
 
 def evaluate_command(args):
-    _positive(args.max_bytes, 'max-bytes')
+    validation.positive(args.max_bytes, 'max-bytes')
     for window in args.windows:
-        _positive(window, 'evaluation windows')
+        validation.positive(window, 'evaluation windows')
     from tmt.benchmark import evaluate as score
 
     model, _ = load_model(args.checkpoint)
@@ -508,12 +380,12 @@ def evaluate_command(args):
 def generate(checkpoint, prompt, output, seed=11, count=512, temperature=None,
              log_every=1000):
     """Replay a UTF-8 prompt and write a fixed count of sampled bytes."""
-    _validate_seed(seed)
+    validation.validate_seed(seed)
     if not prompt:
         raise ValueError('generation needs a nonempty prompt')
     if count < 0:
         raise ValueError('bytes must be nonnegative')
-    _positive(log_every, 'log-every')
+    validation.positive(log_every, 'log-every')
     if temperature is not None and (not math.isfinite(temperature) or temperature < 0):
         raise ValueError('temperature must be a finite nonnegative number')
 
@@ -548,30 +420,16 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
           sample_every=None, sample_prompt='The ', sample_seed=11, sample_bytes=256,
           eval_data=None, eval_every=None, eval_max_bytes=8192):
     """Run each model and seed pair in JSON product order."""
-    _validate_seed(seed)
-    _validate_seed(sample_seed, 'sample-seed')
-    _positive(updates, 'updates')
-    _positive(log_every, 'log-every')
-    _positive(max_bytes, 'max-bytes')
-    _validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
+    validation.validate_training_options(seed, sample_seed, updates, log_every)
+    validation.positive(max_bytes, 'max-bytes')
+    validation.validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
                          eval_every, eval_max_bytes)
     from tmt.benchmark import evaluate
 
     settings = load_config(config)
     with open(grid_path) as file:
         grid = json.load(file)
-    if not isinstance(grid, dict):
-        raise ValueError('sweep grid must be a JSON object')
-    for key, axis in grid.items():
-        if not isinstance(axis, list) or not axis:
-            raise ValueError(f'sweep grid field {key!r} must be a nonempty array')
-        for value in axis:
-            if key == 'seed':
-                _validate_seed(value, 'sweep grid seed')
-            else:
-                candidate = dict(settings)
-                candidate[key] = value
-                _validate_model_settings(candidate, 'model config')
+    validation.validate_sweep_grid(grid, settings)
     keys = list(grid)
     _input_files(pattern)
     if eval_data is not None:
@@ -607,7 +465,7 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
             run_seed = overrides.pop('seed', seed)
             run_settings = dict(settings)
             run_settings.update(overrides)
-            _validate_model_settings(run_settings, 'model config')
+            validation.validate_model_settings(run_settings, 'model config')
             run_path = output / f'run-{index:04d}'
             run_path.mkdir(parents=True, exist_ok=True)
             manifest_dir = run_path / 'manifest'
@@ -781,18 +639,18 @@ def _main(argv=None):
         return
     args = parser.parse_args(argv)
     if hasattr(args, 'seed'):
-        _validate_seed(args.seed)
+        validation.validate_seed(args.seed)
     if args.command in ('train', 'sweep'):
-        _validate_seed(args.sample_seed, 'sample-seed')
-        _positive(args.updates, 'updates')
+        validation.validate_seed(args.sample_seed, 'sample-seed')
+        validation.positive(args.updates, 'updates')
         monitoring = {name: getattr(args, name) for name in (
             'sample_every', 'sample_prompt', 'sample_seed', 'sample_bytes',
             'eval_data', 'eval_every', 'eval_max_bytes',
         )}
-        _validate_monitoring(args.sample_every, args.sample_prompt, args.sample_bytes,
+        validation.validate_monitoring(args.sample_every, args.sample_prompt, args.sample_bytes,
                              args.eval_data, args.eval_every, args.eval_max_bytes)
     if args.command in ('train', 'sweep', 'generate'):
-        _positive(args.log_every, 'log-every')
+        validation.positive(args.log_every, 'log-every')
     if args.command == 'init':
         init_config(args.output)
     elif args.command == 'train':
@@ -801,7 +659,7 @@ def _main(argv=None):
         if args.resume and (args.checkpoint is None or args.run is not None):
             parser.error('--resume requires an explicit checkpoint and forbids --run')
         if args.run is not None:
-            _validate_run_name(args.run)
+            validation.validate_run_name(args.run)
         if not glob.glob(args.data, recursive=True):
             raise FileNotFoundError(f'no files matched {args.data!r}')
         settings = None if args.resume else load_config(args.config or 'model.json')

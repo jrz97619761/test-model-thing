@@ -167,7 +167,7 @@ def test_init(tmp_path, monkeypatch, manifest_fields):
     from tmt.cli import load_config, main
     from tmt.main import Model
 
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     monkeypatch.chdir(tmp_path)
     main(['init'])
     saved = json.loads((tmp_path / 'model.json').read_text())

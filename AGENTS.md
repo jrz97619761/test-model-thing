@@ -23,17 +23,20 @@ Treat model quality claims as experimental results. Small fixtures verify behavi
 | Path | Purpose |
 | --- | --- |
 | `src/tmt/main.py` | Model arithmetic, defaults, RTU traces, loss, optimizer updates, and sampling |
-| `src/tmt/cli.py` | CLI, configuration, checkpoint validation, train, sweep, and generation |
+| `src/tmt/cli.py` | CLI, configuration, checkpoint I/O, train, sweep, and generation |
+| `src/tmt/validation.py` | Shared input, metadata, and array validation |
+| `src/tmt/blocks.py` | Block contracts, runtime state, and RTU layers |
 | `src/tmt/benchmark.py` | Frozen byte evaluation, fixed benchmark fixtures, and optional CoLA classification |
 | `src/tmt/__main__.py` | Entry point for `python -m tmt` |
 | `src/tmt/commands.md` | Packaged command manual, also returned by `tmt help` |
 | `test/test_main.py` | Model arithmetic, gradient, recurrence, and state tests |
-| `test/test_cli.py` | CLI help, configuration, and installed workflow tests |
-| `test/test_cli_validation.py` | CLI input and failure tests |
-| `test/test_checkpoint.py` | Checkpoint validation and round-trip tests |
-| `test/test_training.py`, `test/test_telemetry.py` | Training and telemetry tests |
-| `test/test_evaluation.py`, `test/test_generation.py`, `test/test_sweep.py` | Evaluation, generation, and sweep tests |
-| `test/conftest.py` | Shared pytest fixtures |
+| `test/test_blocks.py` | Block contracts, gradients, state, and integration tests |
+| `test/test_evaluation.py`, `test/test_cola_validation.py` | Byte evaluation and CoLA benchmark tests |
+| `test/test_validation.py` | Shared validator imports and error order |
+| `test/cli/` | CLI commands, input checks, config, checkpoint I/O, train, telemetry, generation, and sweep tests |
+| `test/conftest.py`, `test/fixtures/` | Shared model fixtures and the fixed RTU baseline |
+| `test/cli/conftest.py` | CLI subprocess, workspace, and manifest fixtures |
+| `test/README.md` | Test layout and focused pytest commands |
 | `examples/` | Default model, tiny model, and sweep grid JSON files |
 | `pyproject.toml` | Package metadata, console entry point, and packaged resources |
 

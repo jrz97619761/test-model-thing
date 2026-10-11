@@ -29,8 +29,9 @@ def test_generate(tmp_path, checkpoint_factory):
     assert first_path.read_bytes() == b''
 
 
-@pytest.mark.parametrize('seed', [0, 2**64 - 1])
-def test_generation_seed_limits(saved_checkpoint, tmp_path, seed):
+@pytest.mark.parametrize('seed', [0, 2**64 - 1], ids=['minimum', 'maximum'])
+def test_generation_accepts_seed_boundaries(saved_checkpoint, tmp_path, seed):
+    """Check accepted endpoints. test_generate checks repeatability with seed 11."""
     from tmt.cli import generate
 
     assert len(generate(saved_checkpoint[0], 'X', tmp_path / 'sample.bin', seed, 1)) == 1

@@ -4,6 +4,8 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
+from .validation import matches_array, require
+
 
 class Block(nn.Module):
     """Byte-step block with fixed, frozen runtime arrays and optional temporal gradients."""
@@ -14,36 +16,37 @@ class Block(nn.Module):
     feature_convention = 'final-output'
 
     def validate(self):
-        if not isinstance(self.state_fields, tuple) or not isinstance(self.trace_fields, tuple):
-            raise ValueError('block state and trace fields must be tuples')
+        require(isinstance(self.state_fields, tuple) and isinstance(self.trace_fields, tuple),
+                'block state and trace fields must be tuples')
         fields = self.state_fields + self.trace_fields
-        if (any(not isinstance(name, str) or name.startswith('_') for name in fields)
-                or len(set(fields)) != len(fields)):
-            raise ValueError('block state and trace fields must be distinct public names in tuples')
+        require(
+            all(isinstance(name, str) and not name.startswith('_') for name in fields)
+            and len(set(fields)) == len(fields),
+            'block state and trace fields must be distinct public names in tuples',
+        )
         for label in ('temporal_gradient', 'feature_convention'):
-            if not isinstance(getattr(self, label), str) or not getattr(self, label):
-                raise ValueError(f'block {label} must be a nonempty string')
+            require(isinstance(getattr(self, label), str) and getattr(self, label),
+                    f'block {label} must be a nonempty string')
         trainable = dict(tree_flatten(self.trainable_parameters()))
         for name in fields:
-            if not isinstance(getattr(self, name, None), mx.array):
-                raise ValueError(f'block runtime field {name!r} must be an array')
-            if name in trainable:
-                raise ValueError(f'block runtime field {name!r} must be frozen')
+            require(isinstance(getattr(self, name, None), mx.array),
+                    f'block runtime field {name!r} must be an array')
+            require(name not in trainable, f'block runtime field {name!r} must be frozen')
         self._runtime_schema = tuple((name, getattr(self, name).shape, getattr(self, name).dtype)
                                      for name in fields)
 
     def _validate_values(self, values, fields):
-        if not isinstance(values, dict) or set(values) != set(fields):
-            raise ValueError(f'block state schema must contain exactly {fields!r}')
+        require(isinstance(values, dict) and set(values) == set(fields),
+                f'block state schema must contain exactly {fields!r}')
         schema = {name: (shape, dtype) for name, shape, dtype in self._runtime_schema}
         for name, value in values.items():
             shape, dtype = schema[name]
-            if not isinstance(value, mx.array) or value.shape != shape or value.dtype != dtype:
-                raise ValueError(f'block runtime field {name!r} must retain shape {shape} and dtype {dtype}')
+            require(matches_array(value, shape, dtype),
+                    f'block runtime field {name!r} must retain shape {shape} and dtype {dtype}')
 
     def validate_result(self, enc, x, state):
-        if not isinstance(x, mx.array) or x.shape != enc.shape or x.dtype != enc.dtype:
-            raise ValueError('block output must retain the input vector shape and dtype')
+        require(matches_array(x, enc.shape, enc.dtype),
+                'block output must retain the input vector shape and dtype')
         self._validate_values(state, self.state_fields)
 
     def reset(self):
@@ -72,8 +75,7 @@ class Block(nn.Module):
 
     def commit_state(self, state, traces=None):
         self._validate_values(state, self.state_fields)
-        if traces is not None and not isinstance(traces, dict):
-            raise ValueError('block trace update must be a dictionary')
+        require(traces is None or isinstance(traces, dict), 'block trace update must be a dictionary')
         if traces:
             self._validate_values(traces, self.trace_fields)
         for name, value in {**state, **(traces or {})}.items():

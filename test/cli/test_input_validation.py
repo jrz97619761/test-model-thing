@@ -211,7 +211,7 @@ def test_direct_seed_validation(monkeypatch, seed, operation):
         pytest.fail('model configuration was checked before seed validation')
 
     monkeypatch.setattr(cli, 'load_config', unexpected)
-    monkeypatch.setattr(cli, '_validate_model_settings', unexpected)
+    monkeypatch.setattr(cli.validation, 'validate_model_settings', unexpected)
     monkeypatch.setattr(cli, 'load_model', unexpected)
     monkeypatch.setattr(cli, 'new_model', unexpected)
     monkeypatch.setattr(cli, 'train', unexpected)
@@ -251,7 +251,8 @@ def invalid_settings():
     ids=lambda value: "overflow" if isinstance(value, int) and value > 10**100 else None,
 )
 def test_config_validation(tmp_path, tiny_settings, name, value):
-    from tmt.cli import _validate_metadata, load_config, new_model
+    from tmt.cli import load_config, new_model
+    from tmt.validation import validate_metadata
 
     path = tmp_path / 'model.json'
     path.write_text(json.dumps({name: value}))
@@ -262,7 +263,7 @@ def test_config_validation(tmp_path, tiny_settings, name, value):
         new_model(settings, 11)
     raw = json.dumps({'version': 1, 'model': settings})
     with pytest.raises(ValueError, match=f'checkpoint.model.{name}'):
-        _validate_metadata(raw)
+        validate_metadata(raw)
 
 
 def test_config_limits(tmp_path):

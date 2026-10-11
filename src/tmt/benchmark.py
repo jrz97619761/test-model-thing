@@ -12,6 +12,7 @@ import mlx.nn as nn
 import mlx.optimizers as opt
 
 from .main import Model
+from .validation import validate_seed
 
 # Keep these bytes and windows fixed for checkpoint comparisons.
 BYTE_FIXTURE = "tmt-byte-fixtures-v1"
@@ -192,8 +193,7 @@ def benchmark(model: Model, data: list, train: bool, head: Classification, optim
     return {'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn, 'mcc': mcc(tp, tn, fp, fn)}
 
 def run(path: str, epochs: int = 1, split: float = 0.5, data: str | None = None, *, model=None, seed=11):
-    from tmt.cli import _validate_seed
-    _validate_seed(seed)
+    validate_seed(seed)
 
     rows = None
     if data is not None and epochs < 1:

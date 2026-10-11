@@ -4,6 +4,7 @@ import mlx.optimizers as opt
 from mlx.utils import tree_flatten
 
 from .blocks import BLOCKS, Block, Layer, validate_block
+from .validation import matches_array, matches_arrays, require
 
 class Encoder(nn.Module):
     def __init__(self, dim: int):
@@ -33,8 +34,7 @@ class Model(nn.Module):
 
         self.blocks = [BLOCKS[block](dim, spread) for _ in range(layers)]
         for layer in self.blocks:
-            if not isinstance(layer, Block):
-                raise ValueError('block factories must return a Block module')
+            require(isinstance(layer, Block), 'block factories must return a Block module')
             layer.validate()
 
         def lrfn(step: mx.array):
@@ -137,18 +137,13 @@ class Model(nn.Module):
                 c, states[i], auxiliary[i], dlds_s[i], local
             )
             actual = dict(tree_flatten(adjusted))
-            if actual.keys() != templates.keys() or any(
-                not isinstance(actual[name], mx.array)
-                or actual[name].shape != value.shape or actual[name].dtype != value.dtype
-                for name, value in templates.items()
-            ):
-                raise ValueError('block gradient hook must retain local gradient names, shapes, and dtypes')
+            require(matches_arrays(actual, templates),
+                    'block gradient hook must retain local gradient names, shapes, and dtypes')
             block_grads[i] = adjusted
             if encoder_addition is not None:
                 embedding = grads['encoder']['embed']['weight']
-                if (not isinstance(encoder_addition, mx.array)
-                        or encoder_addition.shape != embedding.shape or encoder_addition.dtype != embedding.dtype):
-                    raise ValueError('block encoder gradient must retain embedding shape and dtype')
+                require(matches_array(encoder_addition, embedding.shape, embedding.dtype),
+                        'block encoder gradient must retain embedding shape and dtype')
                 grads['encoder']['embed']['weight'] += encoder_addition
             layer.commit_state(states[i], traces)
 
@@ -181,8 +176,7 @@ class Model(nn.Module):
         return [layer.snapshot_state() for layer in self.blocks]
 
     def restore_state(self, snapshot):
-        if len(snapshot) != len(self.blocks):
-            raise ValueError('model state snapshot must contain every block')
+        require(len(snapshot) == len(self.blocks), 'model state snapshot must contain every block')
         for layer, saved in zip(self.blocks, snapshot):
             layer._validate_values(saved, layer.state_fields + layer.trace_fields)
         for layer, saved in zip(self.blocks, snapshot):

@@ -368,3 +368,30 @@ def test_initialization_and_forward_purity():
     before = arrays(candidate.parameters())
     candidate.step(mx.array(65))
     equal(before, arrays(candidate.parameters()))
+
+
+@pytest.mark.parametrize('fault', ['missing', 'extra', 'shape', 'dtype', 'nonarray', 'encoder'])
+def test_invalid_gradients_before_optimizer_update(monkeypatch, forbid_call, fault):
+    class Invalid(Stateless):
+        def adjust_gradients(self, byte, next_state, aux, probe_grad, grads):
+            encoder = None
+            if fault == 'missing':
+                grads['proj'].pop('weight')
+            elif fault == 'extra':
+                grads['extra'] = mx.zeros((1,))
+            elif fault == 'shape':
+                grads['proj']['weight'] = mx.zeros((1,))
+            elif fault == 'dtype':
+                grads['proj']['weight'] = grads['proj']['weight'].astype(mx.float16)
+            elif fault == 'nonarray':
+                grads['proj']['weight'] = None
+            else:
+                encoder = mx.zeros((1,))
+            return grads, encoder, {}
+
+    monkeypatch.setitem(BLOCKS, 'invalid-test', Invalid)
+    model = Model(dim=4, layers=1, spread=4, block='invalid-test')
+    monkeypatch.setattr(model, 'updategrads', forbid_call)
+    message = 'block encoder gradient' if fault == 'encoder' else 'block gradient hook'
+    with pytest.raises(ValueError, match=message):
+        model.train_step(65, 66, False)
