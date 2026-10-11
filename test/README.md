@@ -15,7 +15,8 @@
 | `cli/test_telemetry.py` | Periodic samples, held-out scores, RNG preservation, and telemetry files |
 | `cli/test_sweep.py` | Grid validation, candidate runs, results, and failure records |
 | `cli/test_benchmark.py` | Benchmark command failures through both module entry points |
-| `cli/conftest.py` | CLI subprocess, workspace, and manifest fixtures |
+| `cli/conftest.py` | CLI subprocess, workspace, manifest, and telemetry fixtures |
+| `cli/cli_support.py` | Shared field and ordered-record assertions, checkpoint rejection, telemetry snapshots, and JSONL helpers |
 
 ## Core tests
 
@@ -26,12 +27,37 @@
 | `test_evaluation.py` | Frozen byte scores, context windows, state restoration, and benchmark execution |
 | `test_cola_validation.py` | CoLA row parsing and rejection before benchmark work |
 | `test_validation.py` | Shared validator imports without MLX and error order |
-| `conftest.py` | Shared model, checkpoint, and assertion fixtures |
+| `conftest.py` | Model, checkpoint, loss, evaluation, and assertion fixtures |
+| `block_support.py` | Test block implementations and array comparisons |
+| `support.py` | RTU baseline capture for tests and the recorder |
 | `fixtures/rtu-baseline.json` | Fixed RTU behavior for regression checks |
+
+`test_installed_workflow` keeps init, train, resume, evaluate, generate, and benchmark in one installed-command check.
+It shares field assertions, ordered-record assertions, and the JSONL reader with the training, telemetry, and sweep unit tests.
+Expected values stay in each test. Schema, checkpoint, and output-file checks remain explicit.
 
 Core tests can use CLI helpers to create a model or checkpoint. Their assertions check the core contract.
 
 The generation boundary test checks seeds `0` and `2**64 - 1`. The normal generation test uses seed `11` and checks repeatable output.
+
+## RTU baseline
+
+The RTU baseline stores selected logits, losses, gradient summaries, and recurrent state values for seed `11`. It records implementation behavior. Separate tests check recurrence, custom gradients, reset, and frozen-step contracts.
+
+After an intentional RTU change, create and review a candidate fixture:
+
+```sh
+python scripts/record_rtu_baseline.py > /tmp/rtu-baseline.json
+```
+
+If the values are correct, update the saved fixture:
+
+```sh
+python scripts/record_rtu_baseline.py --write
+python -m pytest test/test_main.py
+```
+
+The recording script uses the current implementation. Review its output before you replace the reference values.
 
 ## Run tests
 

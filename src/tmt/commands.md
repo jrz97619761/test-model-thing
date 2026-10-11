@@ -11,6 +11,18 @@ Relative paths use the current directory. The CLI does not search parent folders
 
 The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, `bound`, and `block`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, `[40000, 120000]`, and `"rtu"`. The package registers only the `rtu` block. The optimizer uses `rate` as the weight update rate. `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss.
 
+`tmt.config.MODEL_DEFAULTS` supplies these defaults. `load_config()` resolves partial JSON configurations.
+Direct Python calls to `Model` require all seven settings. For example:
+
+```python
+from tmt.cli import load_config
+from tmt.main import Model
+
+settings = load_config()
+settings.update(dim=4, layers=1, spread=4)
+model = Model(**settings)
+```
+
 `dim`, `layers`, and `spread` must be positive integers. `temp` must be a finite nonnegative number. `rate` must be a finite positive number. `bound` must be a JSON array of two integers with `0 <= start < end`.
 
 `block` must name a registered block. Boolean values are invalid for numeric fields. The CLI checks config values and sweep grid values before model creation or output creation.
@@ -88,6 +100,17 @@ Each factory creates one fresh block per layer. The block call uses `enc`, `x`, 
 It returns `(x_next, next_state, aux)`. `x_next` has shape `[dim]` and keeps the model dtype.
 `next_state` is a dictionary with exactly the field names in `state_fields`.
 
+`Block` exposes `state_fields`, `trace_fields`, `temporal_gradient`, and `feature_convention` as properties without setters.
+Override their getters in a custom block. For example:
+
+```python
+@property
+def state_fields(self):
+    return ('cache',)
+```
+
+These properties describe the block contract. Instance assignment and deletion raise `AttributeError`.
+
 `state_fields` lists public arrays that advance on each byte. `trace_fields` lists public arrays for temporal gradient history.
 Blocks create these fields before optimizer setup and freeze them as runtime state.
 All block parameters stay in the normal MLX parameter tree.
@@ -138,7 +161,7 @@ tmt init [--output PATH]
 
 - `--output PATH` is optional. It writes only model JSON to `PATH`. Without this option, `init` prepares the current folder.
 - The destination folder must allow file and directory creation. A JSON destination that exists raises `FileExistsError` and keeps its contents.
-- `init` reads model constructor defaults and needs MLX. It does not create a model, checkpoint, or run record.
+- `init` reads `MODEL_DEFAULTS` from `tmt.config` and needs MLX. It does not create a model, checkpoint, or run record.
 
 ### Workflow
 
@@ -152,7 +175,7 @@ tmt init --output configs/model.json
 ```
 
 ### Behavior and files
-Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the model constructor defaults, with `"block": "rtu"`. Edit it before a real experiment. The run template sets `sample` and `evaluation` to `null`.
+Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the configuration defaults, with `"block": "rtu"`. Edit it before a real experiment. The run template sets `sample` and `evaluation` to `null`.
 
 `grid.json` has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, `block=["rtu"]`, and `seed=[11,22]`. `run.example.json` shows the manifest fields with an empty file list. It has null values for `started_at`, `trainable_parameters`, and `temporal_gradient`. It is a template, not a run record. The command opens each JSON destination in exclusive-create mode. If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
 

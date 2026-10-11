@@ -3,109 +3,15 @@ from pathlib import Path
 
 import pytest
 
-
-def _model_snapshot(model):
-    import mlx.core as mx
-    import mlx.utils as util
-
-    snapshot = {
-        'parameters': {
-            name: mx.array(value)
-            for name, value in util.tree_flatten(model.trainable_parameters())
-        },
-        'optimizer': {
-            name: mx.array(value)
-            for name, value in util.tree_flatten(model.optimizer.state)
-        },
-        'runtime_state': model.snapshot_state(),
-    }
-    mx.eval(*snapshot['parameters'].values(), *snapshot['optimizer'].values())
-    mx.eval(*(value for block in snapshot['runtime_state'] for value in block.values()))
-    return snapshot
-
-
-def _assert_snapshots_equal(actual, expected):
-    import mlx.core as mx
-
-    for group in ('parameters', 'optimizer'):
-        assert actual[group].keys() == expected[group].keys()
-        assert all(
-            mx.array_equal(value, actual[group][name]).item()
-            for name, value in expected[group].items()
-        )
-
-    assert len(actual['runtime_state']) == len(expected['runtime_state'])
-    for actual_block, expected_block in zip(
-        actual['runtime_state'], expected['runtime_state']
-    ):
-        assert actual_block.keys() == expected_block.keys()
-        assert all(
-            mx.array_equal(value, actual_block[name]).item()
-            for name, value in expected_block.items()
-        )
-
-
-def _assert_model_snapshot(model, snapshot):
-    _assert_snapshots_equal(_model_snapshot(model), snapshot)
-
-
-@pytest.fixture
-def trained_model(model_factory):
-    model = model_factory()
-    model.train_step(65, 66, False, True)
-    model.train_step(66, 67, True, True)
-    assert model.compiled is not None
-    return model
-
-
-def _next_global_random_value(mx):
-    value = mx.random.uniform(shape=(1,))
-    mx.eval(value)
-    return value
-
-
-def _read_jsonl(path):
-    return [json.loads(line) for line in path.read_text().splitlines()]
-
-
-@pytest.fixture
-def sampling_runs(tmp_path, tiny_settings):
-    from tmt.cli import train
-
-    data = tmp_path / 'train.bin'
-    data.write_bytes(b'abcdefghij')
-    sampled_checkpoint = tmp_path / 'sampled' / 'model.safetensors'
-    plain_checkpoint = tmp_path / 'plain' / 'model.safetensors'
-
-    sampled = train(
-        tiny_settings, sampled_checkpoint, str(data), 4, seed=29, ce_only=True,
-        log_every=4, sample_every=2, sample_prompt='The ', sample_seed=13,
-        sample_bytes=3,
-    )
-    plain = train(
-        tiny_settings, plain_checkpoint, str(data), 4, seed=29, ce_only=True,
-        log_every=4,
-    )
-    sampled_snapshot = _model_snapshot(sampled)
-    plain_snapshot = _model_snapshot(plain)
-
-    sample_rows = _read_jsonl(sampled_checkpoint.parent / 'manifest' / 'samples.jsonl')
-    resumed = train(
-        None, sampled_checkpoint, str(data), 2, seed=29, ce_only=True,
-        resume=True, log_every=2, sample_every=1, sample_prompt='The ',
-        sample_seed=13, sample_bytes=2,
-    )
-
-    return {
-        'sample_rows': sample_rows,
-        'root': tmp_path,
-        'sampled': sampled,
-        'sampled_snapshot': sampled_snapshot,
-        'plain': plain,
-        'plain_snapshot': plain_snapshot,
-        'sampled_checkpoint': sampled_checkpoint,
-        'resumed': resumed,
-    }
+from cli_support import (
+    assert_fields,
+    assert_ordered_records,
+    assert_model_snapshot,
+    assert_snapshots_equal,
+    model_snapshot,
+    next_global_random_value,
+    read_jsonl,
+)
 
 
 def test_sample_state_and_rng(monkeypatch, trained_model):
@@ -113,9 +19,9 @@ def test_sample_state_and_rng(monkeypatch, trained_model):
     from tmt.cli import _training_sample
 
     model = trained_model
-    before = _model_snapshot(model)
+    before = model_snapshot(model)
     mx.random.seed(817)
-    expected_next = _next_global_random_value(mx)
+    expected_next = next_global_random_value(mx)
     mx.random.seed(817)
 
     sample_calls = []
@@ -127,25 +33,25 @@ def test_sample_state_and_rng(monkeypatch, trained_model):
 
     monkeypatch.setattr(model, 'sample', record_sample)
     first = _training_sample(model, 'The ', 5, 31)
-    actual_next = _next_global_random_value(mx)
+    actual_next = next_global_random_value(mx)
 
     assert isinstance(first, bytes)
     assert len(first) == 5
     assert mx.array_equal(expected_next, actual_next).item()
-    _assert_model_snapshot(model, before)
+    assert_model_snapshot(model, before)
     assert sample_calls
-    assert all(
-        kwargs.get('key') is not None or len(args) >= 2
-        for args, kwargs in sample_calls
-    ), 'training sample must pass an explicit MLX random key'
+    for call_index, (args, kwargs) in enumerate(sample_calls):
+        assert kwargs.get('key') is not None or len(args) >= 2, (
+            f'training sample call {call_index} omitted its explicit MLX random key'
+        )
 
     # Sampling starts from a reset model, so prior recurrent state does not
     # change the generated bytes. The helper must restore that state after use.
     model.reset()
-    reset_snapshot = _model_snapshot(model)
+    reset_snapshot = model_snapshot(model)
     second = _training_sample(model, 'The ', 5, 31)
     assert first == second
-    _assert_model_snapshot(model, reset_snapshot)
+    assert_model_snapshot(model, reset_snapshot)
 
 
 def test_sample_failure(monkeypatch, trained_model):
@@ -153,9 +59,9 @@ def test_sample_failure(monkeypatch, trained_model):
     from tmt.cli import _training_sample
 
     model = trained_model
-    before = _model_snapshot(model)
+    before = model_snapshot(model)
     mx.random.seed(991)
-    expected_next = _next_global_random_value(mx)
+    expected_next = next_global_random_value(mx)
     mx.random.seed(991)
 
     def fail_sampling(*args, **kwargs):
@@ -165,32 +71,56 @@ def test_sample_failure(monkeypatch, trained_model):
     with pytest.raises(RuntimeError, match='injected sampling failure'):
         _training_sample(model, 'A prompt', 4, 7)
 
-    actual_next = _next_global_random_value(mx)
+    actual_next = next_global_random_value(mx)
     assert mx.array_equal(expected_next, actual_next).item()
-    _assert_model_snapshot(model, before)
+    assert_model_snapshot(model, before)
 
 
 def test_sampling_preserves_training_updates(sampling_runs):
     runs = sampling_runs
     assert runs['sampled'].compiled is not None
     assert runs['plain'].compiled is not None
-    _assert_snapshots_equal(runs['sampled_snapshot'], runs['plain_snapshot'])
+    assert_snapshots_equal(runs['sampled_snapshot'], runs['plain_snapshot'])
 
 
-@pytest.mark.parametrize(('row_index', 'completed_updates'), [(0, 2), (1, 4)])
+@pytest.mark.parametrize(
+    ('row_index', 'completed_updates'),
+    [(0, 2), (1, 4)],
+    ids=['first-sample', 'second-sample'],
+)
 def test_sample_outputs(sampling_runs, row_index, completed_updates):
     checkpoint = sampling_runs['sampled_checkpoint']
     rows = sampling_runs['sample_rows']
-    assert [row['completed_updates'] for row in rows] == [2, 4]
+    assert_ordered_records(
+        rows,
+        [
+            {'completed_updates': 2},
+            {'completed_updates': 4},
+        ],
+        context='training samples',
+    )
     row = rows[row_index]
 
-    assert row['completed_updates'] == completed_updates
-    assert row['optimizer_step'] == completed_updates
-    assert (row['prompt'], row['seed'], row['bytes']) == ('The ', 13, 3)
+    assert_fields(
+        row,
+        {
+            'completed_updates': completed_updates,
+            'optimizer_step': completed_updates,
+            'prompt': 'The ',
+            'seed': 13,
+            'bytes': 3,
+        },
+        context=f'training sample {row_index}',
+    )
     sample_path = Path(row['path'])
     if not sample_path.is_absolute():
-        candidates = (checkpoint.parent / sample_path, sampling_runs['root'] / sample_path)
-        sample_path = next((path for path in candidates if path.exists()), candidates[0])
+        candidates = (
+            checkpoint.parent / sample_path,
+            sampling_runs['root'] / sample_path,
+        )
+        sample_path = next(
+            (path for path in candidates if path.exists()), candidates[0]
+        )
     assert sample_path.is_file()
     assert len(sample_path.read_bytes()) == row['bytes']
 
@@ -198,89 +128,60 @@ def test_sample_outputs(sampling_runs, row_index, completed_updates):
 @pytest.mark.parametrize(
     ('row_index', 'completed_updates', 'optimizer_step'),
     [(0, 1, 5), (1, 2, 6)],
+    ids=['first-resume-sample', 'second-resume-sample'],
 )
 def test_resume_sample_steps(
-    sampling_runs, row_index, completed_updates, optimizer_step
+    sampling_runs, sampling_resume, row_index, completed_updates, optimizer_step
 ):
     checkpoint = sampling_runs['sampled_checkpoint']
-    rows = _read_jsonl(checkpoint.parent / 'manifest' / 'samples.jsonl')
-    assert [(row['completed_updates'], row['optimizer_step']) for row in rows] == [(1, 5), (2, 6)]
-    resumed_rows = rows
-    row = resumed_rows[row_index]
+    rows = read_jsonl(checkpoint.parent / 'manifest' / 'samples.jsonl')
+    assert_ordered_records(
+        rows,
+        [
+            {'completed_updates': 1, 'optimizer_step': 5},
+            {'completed_updates': 2, 'optimizer_step': 6},
+        ],
+        context='resume samples',
+    )
+    row = rows[row_index]
 
-    assert int(sampling_runs['resumed'].optimizer.state['step'].item()) == 6
-    assert (row['completed_updates'], row['optimizer_step']) == (
-        completed_updates, optimizer_step
+    assert int(sampling_resume.optimizer.state['step'].item()) == 6
+    assert_fields(
+        row,
+        {
+            'completed_updates': completed_updates,
+            'optimizer_step': optimizer_step,
+        },
+        context=f'resume sample {row_index}',
     )
 
 
-@pytest.fixture
-def evaluation_runs(tmp_path, tiny_settings):
-    from tmt.cli import train
-
-    training_data = tmp_path / 'training.bin'
-    training_data.write_bytes(b'abcdefghij')
-    development = tmp_path / 'development'
-    development.mkdir()
-    first = development / 'a.bin'
-    second = development / 'b.bin'
-    first.write_bytes(b'abcd')
-    second.write_bytes(b'uvwxyz')
-    evaluation_pattern = str(development / '*.bin')
-    monitored_checkpoint = tmp_path / 'monitored' / 'model.safetensors'
-    plain_checkpoint = tmp_path / 'plain' / 'model.safetensors'
-
-    monitored = train(
-        tiny_settings, monitored_checkpoint, str(training_data), 5, seed=43,
-        ce_only=True, log_every=5, eval_data=evaluation_pattern,
-        eval_every=2, eval_max_bytes=7,
-    )
-    plain = train(
-        tiny_settings, plain_checkpoint, str(training_data), 5, seed=43,
-        ce_only=True, log_every=5,
-    )
-
-    exact_checkpoint = tmp_path / 'exact' / 'model.safetensors'
-    train(
-        tiny_settings, exact_checkpoint, str(training_data), 4, seed=43,
-        ce_only=True, log_every=4, eval_data=evaluation_pattern,
-        eval_every=2, eval_max_bytes=7,
-    )
-
-    return {
-        'tmp_path': tmp_path,
-        'monitored': monitored,
-        'monitored_snapshot': _model_snapshot(monitored),
-        'plain': plain,
-        'plain_snapshot': _model_snapshot(plain),
-        'monitored_checkpoint': monitored_checkpoint,
-        'exact_checkpoint': exact_checkpoint,
-        'evaluation_pattern': evaluation_pattern,
-        'first': first,
-        'second': second,
-    }
-
-
-def test_evaluation_budget(
-    evaluation_runs, assert_almost_equal
-):
+def test_evaluation_budget(evaluation_runs, assert_almost_equal):
     from tmt.benchmark import evaluate
     from tmt.cli import documents
 
     runs = evaluation_runs
     assert runs['monitored'].compiled is not None
     assert runs['plain'].compiled is not None
-    _assert_snapshots_equal(runs['plain_snapshot'], runs['monitored_snapshot'])
+    assert_snapshots_equal(runs['plain_snapshot'], runs['monitored_snapshot'])
 
     checkpoint = runs['monitored_checkpoint']
-    rows = _read_jsonl(checkpoint.parent / 'manifest' / 'evaluation.jsonl')
-    assert [row['completed_updates'] for row in rows] == [2, 4, 5]
-    assert len({row['completed_updates'] for row in rows}) == len(rows)
-    assert all(row['optimizer_step'] == row['completed_updates'] for row in rows)
-    assert all(
-        (row['input_bytes'], row['targets'], row['windows']) == (7, 5, [])
-        for row in rows
+    rows = read_jsonl(checkpoint.parent / 'manifest' / 'evaluation.jsonl')
+    assert_ordered_records(
+        rows,
+        [
+            {
+                'completed_updates': update,
+                'optimizer_step': update,
+                'input_bytes': 7,
+                'targets': 5,
+                'windows': [],
+            }
+            for update in (2, 4, 5)
+        ],
+        context='periodic evaluations',
     )
+    assert len({row['completed_updates'] for row in rows}) == len(rows)
 
     evaluation_pattern = runs['evaluation_pattern']
     manifest = json.loads((checkpoint.parent / 'manifest' / 'run.json').read_text())
@@ -297,40 +198,18 @@ def test_evaluation_budget(
 
 
 def test_final_evaluation_is_not_duplicated(evaluation_runs):
-    rows = _read_jsonl(
-        evaluation_runs['exact_checkpoint'].parent
-        / 'manifest' / 'evaluation.jsonl'
+    rows = read_jsonl(
+        evaluation_runs['exact_checkpoint'].parent / 'manifest' / 'evaluation.jsonl'
     )
-    assert [row['completed_updates'] for row in rows] == [2, 4]
+    assert_ordered_records(
+        rows,
+        [
+            {'completed_updates': 2},
+            {'completed_updates': 4},
+        ],
+        context='exact-interval evaluations',
+    )
     assert len({row['completed_updates'] for row in rows}) == len(rows)
-
-
-@pytest.fixture
-def loss_run(tmp_path, tiny_settings, monkeypatch):
-    from tmt.cli import train
-    from tmt.main import Model
-
-    data = tmp_path / 'train.bin'
-    data.write_bytes(b'abcdefg')
-    checkpoint = tmp_path / 'run' / 'model.safetensors'
-    per_update = []
-    original_train_step = Model.train_step
-
-    def capture(model, *args, metrics=None, **kwargs):
-        result = original_train_step(model, *args, metrics=metrics, **kwargs)
-        per_update.append({
-            'loss': float(result[2].item()),
-            'components': dict(metrics),
-        })
-        return result
-
-    monkeypatch.setattr(Model, 'train_step', capture)
-    train(tiny_settings, checkpoint, str(data), 5, seed=37, log_every=2)
-
-    return {
-        'per_update': per_update,
-        'rows': _read_jsonl(checkpoint.parent / 'manifest' / 'loss.jsonl'),
-    }
 
 
 def test_loss_means(loss_run, assert_almost_equal):
@@ -355,5 +234,7 @@ def test_loss_means(loss_run, assert_almost_equal):
             assert_almost_equal(
                 row['mean_loss_components'][name], expected_component, places=7
             )
-        assert_almost_equal(sum(row['mean_loss_components'].values()), row['mean_loss'], places=5)
+        assert_almost_equal(
+            sum(row['mean_loss_components'].values()), row['mean_loss'], places=5
+        )
         start = stop

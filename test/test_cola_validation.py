@@ -16,7 +16,9 @@ from tmt.benchmark import cola, run
     ],
 )
 @pytest.mark.parametrize('supply_model', [False, True])
-def test_rejects_malformed_rows_before_work(tmp_path, monkeypatch, forbid_call, row, error, supply_model):
+def test_rejects_malformed_rows_before_work(
+    tmp_path, monkeypatch, forbid_call, row, error, supply_model
+):
     data = tmp_path / 'cola.tsv'
     data.write_text(
         'src\t1\tx\talpha\n\nsrc\t0\tx\tbeta\n' + row + '\n',
@@ -61,14 +63,13 @@ def test_rejects_invalid_labels(tmp_path, label, row_number, error):
 def test_run_rejects_invalid_labels_before_work(tmp_path, monkeypatch, forbid_call):
     data = tmp_path / 'cola.tsv'
     data.write_text(
-        'src\t1\tx\talpha\n'
-        'src\t0\tx\tbeta\n'
-        'src\t2\tx\tgamma\n'
-        'src\t2\tx\tdelta\n',
+        'src\t1\tx\talpha\nsrc\t0\tx\tbeta\nsrc\t2\tx\tgamma\nsrc\t2\tx\tdelta\n',
         encoding='utf-8',
     )
     monkeypatch.setattr(cli, 'load_model', forbid_call)
     monkeypatch.setattr(benchmark, 'evaluate', forbid_call)
 
-    with pytest.raises(ValueError, match=r'row 3 has invalid label .2.; expected 0 or 1'):
+    with pytest.raises(
+        ValueError, match=r'row 3 has invalid label .2.; expected 0 or 1'
+    ):
         run('missing.safetensors', data=str(data))

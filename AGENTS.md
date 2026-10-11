@@ -23,7 +23,8 @@ Treat model quality claims as experimental results. Small fixtures verify behavi
 
 | Path | Purpose |
 | --- | --- |
-| `src/tmt/main.py` | Model arithmetic, defaults, RTU traces, loss, optimizer updates, and sampling |
+| `src/tmt/main.py` | Model arithmetic, RTU traces, loss, optimizer updates, and sampling |
+| `src/tmt/config.py` | Model configuration defaults |
 | `src/tmt/cli.py` | CLI, configuration, checkpoint I/O, train, sweep, and generation |
 | `src/tmt/validation.py` | Shared input, metadata, and array validation |
 | `src/tmt/blocks.py` | Block contracts, runtime state, and RTU layers |
@@ -80,7 +81,8 @@ python -m tmt --version
 ## Model and evaluation contracts
 
 - Preserve raw-byte input and output. The encoder and decoder use 256 byte values.
-- Keep `Model` defaults as the source for configuration. `load_config()` reads the constructor signature.
+- Keep `MODEL_DEFAULTS` in `src/tmt/config.py` as the source for configuration defaults.
+- Direct `Model` calls require every setting. `load_config()` resolves partial CLI configuration.
 - If defaults or constructor fields change, check metadata validation, example JSON files, tests, and command documentation.
 - Keep imports free of file writes, prompts, argument parsing, or model runs.
 - Keep CLI help and version available without an MLX import. Preserve lazy imports in `cli.py`.

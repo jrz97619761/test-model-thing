@@ -17,14 +17,27 @@ def clean(root):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--clean-only', action='store_true',
-                        help='remove build/ and src/*.egg-info without a build')
+    parser.add_argument(
+        '--clean-only',
+        action='store_true',
+        help='remove build/ and src/*.egg-info without a build',
+    )
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[1]
     try:
         if not args.clean_only:
-            subprocess.run([sys.executable, '-m', 'build', '--wheel', '--outdir', str(root / 'dist')],
-                           cwd=root, check=True)
+            subprocess.run(
+                [
+                    sys.executable,
+                    '-m',
+                    'build',
+                    '--wheel',
+                    '--outdir',
+                    str(root / 'dist'),
+                ],
+                cwd=root,
+                check=True,
+            )
     finally:
         clean(root)
 
