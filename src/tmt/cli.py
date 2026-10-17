@@ -38,7 +38,6 @@ def load_config(path=None):
 def new_model(settings, seed):
     validation.seed(seed)
     validation.model_settings(settings, 'model config')
-    import random
     import mlx.core as mx
     from tmt.main import Model
 
@@ -98,11 +97,7 @@ def _flatten(tree, prefix):
 def save_checkpoint(path, model, settings):
     import mlx.core as mx
 
-    resolved = {
-        name: list(value) if isinstance(value, tuple) else value
-        for name, value in settings.items()
-    }
-    raw = json.dumps({'version': 1, 'model': resolved})
+    raw = json.dumps({'version': 1, 'model': settings})
     validation.metadata(raw)
     model.optimizer.init(model.trainable_parameters())
     tensors = _flatten(model.parameters(), 'm')
@@ -166,7 +161,7 @@ def documents(pattern, max_bytes=None):
         yield data
 
 
-def _write_manifest(path, record):
+def _write_json(path, record):
     with open(path, 'w') as file:
         json.dump(record, file, indent=2)
         file.write('\n')
@@ -379,7 +374,7 @@ def train(
         metrics.write_text('')
         (manifest_dir / 'samples.jsonl').write_text('')
         (manifest_dir / 'evaluation.jsonl').write_text('')
-        _write_manifest(manifest, record)
+        _write_json(manifest, record)
         print(
             f'run folder: {checkpoint.parent}, seed: {seed}, '
             f'config: {json.dumps(settings)}'
@@ -430,7 +425,7 @@ def train(
     finally:
         record['status'] = status
         record['completed_updates'] = completed
-        _write_manifest(manifest, record)
+        _write_json(manifest, record)
         if last_loss is not None and completed != logged:
             report_loss()
 
@@ -461,9 +456,7 @@ def evaluate_command(args):
             f'common BPB {window["common_bpb"]}, delta {window["delta_bpb"]}'
         )
     if args.output is not None:
-        with open(args.output, 'w') as file:
-            json.dump(result, file, indent=2)
-            file.write('\n')
+        _write_json(args.output, result)
 
 
 def generate(
@@ -482,7 +475,6 @@ def generate(
     import mlx.core as mx
 
     model, _ = load_model(checkpoint, seed)
-    mx.eval(model.parameters())
     model.reset()
     if temperature is not None:
         model.temp = temperature
@@ -574,7 +566,7 @@ def sweep(
         'current_run': None,
         'error': None,
     }
-    _write_manifest(sweep_manifest, record)
+    _write_json(sweep_manifest, record)
     try:
         for index, values in enumerate(
             itertools.product(*(grid[key] for key in keys)), 1
@@ -589,9 +581,7 @@ def sweep(
             run_path.mkdir(parents=True, exist_ok=True)
             manifest_dir = run_path / 'manifest'
             manifest_dir.mkdir(parents=True, exist_ok=True)
-            with open(manifest_dir / 'model.json', 'w') as file:
-                json.dump(run_settings, file, indent=2)
-                file.write('\n')
+            _write_json(manifest_dir / 'model.json', run_settings)
             checkpoint = run_path / 'model.safetensors'
             model = train(
                 run_settings,
@@ -626,11 +616,10 @@ def sweep(
                 'development_bpb': score['bpb'],
                 'checkpoint': str(checkpoint.resolve()),
             }
-            with open(results_path, 'a') as file:
-                file.write(json.dumps(row) + '\n')
+            _append_jsonl(results_path, row)
             rows.append(row)
             record['completed_runs'] = len(rows)
-            _write_manifest(sweep_manifest, record)
+            _write_json(sweep_manifest, record)
         record['status'] = 'complete'
     except (Exception, KeyboardInterrupt) as error:
         record['status'] = (
@@ -639,7 +628,7 @@ def sweep(
         record['error'] = {'type': type(error).__name__, 'message': str(error)}
         raise
     finally:
-        _write_manifest(sweep_manifest, record)
+        _write_json(sweep_manifest, record)
 
     best = min(rows, key=lambda row: row['development_bpb'])
     print(f'best row: {json.dumps(best)}')
@@ -967,12 +956,11 @@ def _main(argv=None):
             )
         }
         validation.monitoring(
-            args.sample_every,
-            args.sample_prompt,
-            args.sample_bytes,
-            args.eval_data,
-            args.eval_every,
-            args.eval_max_bytes,
+            **{
+                name: value
+                for name, value in monitoring.items()
+                if name != 'sample_seed'
+            }
         )
     if args.command in ('train', 'sweep', 'generate'):
         validation.positive(args.log_every, 'log-every')

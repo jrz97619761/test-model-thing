@@ -28,15 +28,6 @@ BYTE_DOCUMENTS = (
 CONTEXT_WINDOWS = (1, 8, 32, 128)
 
 
-class Classification(nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        self.proj = nn.Linear(dim, 2)
-
-    def __call__(self, x: mx.array):
-        return self.proj(x)
-
-
 def cola(filepath: str):
     data = []
 
@@ -190,16 +181,13 @@ def benchmark(
     model: Model,
     data: list,
     train: bool,
-    head: Classification,
+    head: nn.Linear,
     optimizer: opt.AdamW,
     lossfn,
 ):
     tp, tn, fp, fn = 0, 0, 0, 0
 
     for b_s, label in data:
-        if len(b_s) == 0:
-            continue
-
         state = rollout(model, b_s)
         if state is None:
             continue
@@ -244,7 +232,7 @@ def run(
         raise ValueError('epochs must be positive with cola-data')
     if data is not None:
         rows = cola(data)
-        if rows == [] or len(rows) < 2:
+        if len(rows) < 2:
             raise FileNotFoundError(
                 f'CoLA TSV {data!r} must contain at least two valid four-column rows.'
             )
@@ -274,7 +262,7 @@ def run(
     train, held = rows[:split], rows[split:]
 
     mx.random.seed(seed)
-    head = Classification(model.dim)
+    head = nn.Linear(model.dim, 2)
     optimizer = opt.AdamW(learning_rate=1e-3)
 
     def lossfn(params, state: mx.array, target: int):
