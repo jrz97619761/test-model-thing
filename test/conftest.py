@@ -53,19 +53,6 @@ def model_factory(tiny_settings):
 
 
 @pytest.fixture
-def register_test_blocks(monkeypatch):
-    from block_support import MatrixCache, NoWeights, Stateless
-    from tmt.blocks import BLOCKS
-
-    for name, block in (
-        ('stateless-test', Stateless),
-        ('matrix-test', MatrixCache),
-        ('empty-test', NoWeights),
-    ):
-        monkeypatch.setitem(BLOCKS, name, block)
-
-
-@pytest.fixture
 def evaluation_model():
     import mlx.core as mx
 
