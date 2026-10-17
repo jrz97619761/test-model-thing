@@ -66,38 +66,6 @@ def register_test_blocks(monkeypatch):
 
 
 @pytest.fixture
-def loss_case(model_factory):
-    import math
-
-    import mlx.core as mx
-
-    model = model_factory()
-    x = [0.0, 0.5, 1.0, 1.5]
-    output = mx.arange(256) * 0.001
-    stop = mx.array([0.2])
-    target = model.encoder(mx.array(67))
-    mx.eval(output, stop, target)
-
-    logits = [float(value) for value in output.tolist()]
-    x_mean = sum(x) / len(x)
-    variance = sum((value - x_mean) ** 2 for value in x) / len(x)
-    variance_term = max(0.0, 1.0 - math.sqrt(variance + 1e-4))
-    latent = [float(value) for value in target.tolist()]
-    latent_term = sum((left - right) ** 2 for left, right in zip(x, latent)) / len(x)
-    maximum = max(logits)
-    logsumexp = maximum + math.log(sum(math.exp(value - maximum) for value in logits))
-    cross_entropy = -logits[67] + logsumexp
-    stop_value = float(stop.item())
-    terms = {
-        'variance': variance_term,
-        'latent_prediction': latent_term,
-        'cross_entropy': cross_entropy,
-        'stop': (stop_value - 1.0) ** 2,
-    }
-    return model, mx.array(x), output, stop, terms
-
-
-@pytest.fixture
 def evaluation_model():
     import mlx.core as mx
 
