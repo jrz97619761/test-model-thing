@@ -31,13 +31,13 @@ Treat model quality claims as experimental results. Small fixtures verify behavi
 | `src/tmt/benchmark.py` | Frozen byte evaluation, fixed benchmark fixtures, and optional CoLA classification |
 | `src/tmt/__main__.py` | Entry point for `python -m tmt` |
 | `src/tmt/commands.md` | Packaged command manual, also returned by `tmt help` |
-| `test/test_main.py` | Model arithmetic, gradient, recurrence, and state tests |
-| `test/test_blocks.py` | Block contracts, gradients, state, and integration tests |
-| `test/test_evaluation.py`, `test/test_cola_validation.py` | Byte evaluation and CoLA benchmark tests |
-| `test/test_validation.py` | Shared validator imports and error order |
-| `test/cli/` | CLI commands, input checks, config, checkpoint I/O, train, telemetry, generation, and sweep tests |
-| `test/conftest.py`, `test/fixtures/` | Shared model fixtures and the fixed RTU baseline |
-| `test/cli/conftest.py` | CLI subprocess, workspace, and manifest fixtures |
+| `test/test_model.py` | Model arithmetic, loss, RTU recurrence, gradients, and the RTU baseline (with recorder) |
+| `test/test_blocks.py` | Block contracts, state, restore, checkpoints, and schema checks |
+| `test/test_benchmark.py` | Byte evaluation, CoLA parsing, benchmark run, and `python -m tmt.benchmark` |
+| `test/test_config.py` | Config, init templates, examples, validation order, and checkpoint file checks |
+| `test/test_cli.py` | Help, version, argument and value errors, generate, evaluate, and the installed-command smoke test |
+| `test/test_train.py` | Training loop, manifests, loss rows, samples, interval evaluation, and sweep |
+| `test/conftest.py`, `test/fixtures/` | Shared fixtures and the fixed RTU baseline |
 | `examples/` | Default model, tiny model, and sweep grid JSON files |
 | `pyproject.toml` | Package metadata, console entry point, and packaged resources |
 
