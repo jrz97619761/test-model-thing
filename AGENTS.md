@@ -38,7 +38,6 @@ Treat model quality claims as experimental results. Small fixtures verify behavi
 | `test/cli/` | CLI commands, input checks, config, checkpoint I/O, train, telemetry, generation, and sweep tests |
 | `test/conftest.py`, `test/fixtures/` | Shared model fixtures and the fixed RTU baseline |
 | `test/cli/conftest.py` | CLI subprocess, workspace, and manifest fixtures |
-| `test/README.md` | Test layout and focused pytest commands |
 | `examples/` | Default model, tiny model, and sweep grid JSON files |
 | `pyproject.toml` | Package metadata, console entry point, and packaged resources |
 
