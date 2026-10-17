@@ -39,26 +39,19 @@ Install the build tool:
 python -m pip install build
 ```
 
-Build a wheel:
+Build a wheel, then remove the temporary build artifacts:
 
 ```bash
-python scripts/build_wheel.py
+python -m build --wheel
+rm -rf build src/*.egg-info
 ```
 
-This command creates `dist/test_model_thing-1.0.0-py3-none-any.whl` for the current project version.
+The first command creates `dist/test_model_thing-1.0.0-py3-none-any.whl` for the current project version.
 It uses an isolated build environment and the Setuptools requirement in `pyproject.toml`.
 It does not install TMT or publish files.
-After success or failure, the script removes `build/` and direct `src/*.egg-info` artifacts.
+The second command removes `build/` and direct `src/*.egg-info` artifacts. Run it after success or failure.
 It keeps `dist/`, `.venv/`, source code, and installed `.dist-info` metadata.
-Run this script when no other build or package installation uses the checkout.
-
-To remove those temporary artifacts without a build, use:
-
-```bash
-python scripts/build_wheel.py --clean-only
-```
-
-The cleanup command needs only Python. Run the script from the repository root, or supply its full path from another directory.
+Run these commands from the repository root when no other build or package installation uses the checkout.
 
 Install that wheel in the target virtual environment:
 
@@ -76,10 +69,10 @@ MLX needs a compatible runtime even though the TMT wheel contains only Python co
 
 Setuptools can create `src/test_model_thing.egg-info` during a wheel build or an editable installation.
 This generated folder contains source metadata. It is not an `.egg` distribution.
-Git ignores this folder. The build script removes it after the build. Setuptools can recreate it after removal.
+Git ignores this folder. The `rm` command removes it after the build. Setuptools can recreate it after removal.
 
 Keep installed `.dist-info` metadata because pip and the version command use it.
-Use `python scripts/build_wheel.py` for distribution, not legacy egg commands such as `setup.py bdist_egg`.
+Use `python -m build --wheel` for distribution, not legacy egg commands such as `setup.py bdist_egg`.
 
 For local development, use `python -m pip install -e '.[test]'`.
 This editable installation uses source files directly and installs pytest.
