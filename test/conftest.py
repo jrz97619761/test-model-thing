@@ -1,36 +1,8 @@
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
-
-
-@dataclass(frozen=True)
-class SavedCheckpoint:
-    path: Path
-    mx: Any
-    settings: dict[str, Any]
-    model: Any
-    arrays: dict[str, Any]
-    metadata: dict[str, str]
-
-
-@pytest.fixture
-def assert_almost_equal():
-    """Keep the original decimal rounding and absolute delta checks."""
-
-    def compare(actual, expected, places=7, delta=None):
-        if actual == expected:
-            return
-        difference = abs(actual - expected)
-        if delta is not None:
-            assert difference <= delta
-        else:
-            assert round(difference, places) == 0
-
-    return compare
 
 
 @pytest.fixture
@@ -58,35 +30,6 @@ def forbid_call():
         pytest.fail('unexpected call before input validation')
 
     return fail
-
-
-@pytest.fixture
-def checkpoint_factory(tiny_settings):
-    import mlx.core as mx
-    from tmt.cli import new_model, save_checkpoint
-
-    def save(path):
-        model = new_model(tiny_settings, 11)
-        save_checkpoint(path, model, tiny_settings)
-        arrays, metadata = mx.load(path, return_metadata=True)
-        mx.eval(arrays)
-        return mx, dict(tiny_settings), model, arrays, metadata
-
-    return save
-
-
-@pytest.fixture
-def saved_checkpoint(tmp_path, checkpoint_factory):
-    path = tmp_path / 'model.safetensors'
-    mx, settings, model, arrays, metadata = checkpoint_factory(path)
-    return SavedCheckpoint(
-        path=path,
-        mx=mx,
-        settings=settings,
-        model=model,
-        arrays=arrays,
-        metadata=metadata,
-    )
 
 
 @pytest.fixture
@@ -175,7 +118,7 @@ def run_cli(tmp_path, monkeypatch, capsys):
 
 @pytest.fixture
 def workspace(tmp_path, monkeypatch, tiny_settings):
-    """Make tmp_path the current folder with model.json, grid.json, train.bin, dev.bin."""
+    """Run in tmp_path with model.json, grid.json, train.bin, and dev.bin."""
     (tmp_path / 'model.json').write_text(json.dumps(tiny_settings))
     (tmp_path / 'grid.json').write_text('{"seed": [11, 22]}')
     (tmp_path / 'train.bin').write_bytes(b'abc')
