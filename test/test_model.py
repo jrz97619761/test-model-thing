@@ -150,7 +150,7 @@ def test_rtu_baseline():
     fixture = json.loads(FIXTURE.read_text())
     keys = ('config', 'seed', 'steps', 'output_indices', 'state_rows')
     actual_updates = capture_rtu_baseline(*(fixture[key] for key in keys))
-    if os.environ.get('TMT_RECORD_RTU_BASELINE'):
+    if os.environ.get('TMT_RECORD_RTU_BASELINE') == '1':
         FIXTURE.write_text(
             json.dumps({**fixture, 'updates': actual_updates}, indent=2) + '\n'
         )

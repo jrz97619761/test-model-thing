@@ -106,30 +106,39 @@ def test_version(monkeypatch, capsys, metadata, commit):
 
 
 @pytest.mark.parametrize(
-    ('argv', 'code', 'stdout_start', 'stderr_has'),
+    ('module', 'argv', 'code', 'stdout_start', 'stderr_has'),
     [
-        ('--help', 0, 'usage: tmt', ''),
-        ('--version', 0, 'tmt ', ''),
-        ('help', 0, '# TMT command manual', ''),
-        ('help train', 0, '## train', ''),
-        ('generate --help', 0, '## generate', ''),
-        ('train --data missing/* --seed -1', 1, '', 'seed must be between'),
+        ('tmt', '--help', 0, 'usage: tmt', ''),
+        ('tmt', '--version', 0, 'tmt ', ''),
+        ('tmt', 'help', 0, '# TMT command manual', ''),
+        ('tmt', 'help train', 0, '## train', ''),
+        ('tmt', 'generate --help', 0, '## generate', ''),
+        ('tmt', 'train --data missing/* --seed -1', 1, '', 'seed must be between'),
+        ('tmt.benchmark', '--help', 0, '## benchmark', ''),
     ],
-    ids=['--help', '--version', 'help', 'help-train', 'generate-help', 'seed-error'],
+    ids=[
+        '--help',
+        '--version',
+        'help',
+        'help-train',
+        'generate-help',
+        'seed-error',
+        'benchmark-module-help',
+    ],
 )
 def test_model_free_commands(
-    model_free_cli, tmp_path, manual, argv, code, stdout_start, stderr_has
+    model_free_cli, tmp_path, manual, module, argv, code, stdout_start, stderr_has
 ):
-    result = model_free_cli(*shlex.split(argv))
+    result = model_free_cli(*shlex.split(argv), module=module)
     assert result.returncode == code, result.stderr
     assert result.stdout.startswith(stdout_start)
     assert stderr_has in result.stderr
     assert 'Traceback' not in result.stderr
     assert list(tmp_path.iterdir()) == []
-    if argv == '--help':
+    if (module, argv) == ('tmt', '--help'):
         assert 'tmt help' in result.stdout
         assert '## init' not in result.stdout
-    if argv == 'help':
+    if (module, argv) == ('tmt', 'help'):
         assert result.stdout == manual
 
 
@@ -422,6 +431,7 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
         *('sweep', '--grid', 'g.json', '--data', 'data/train/*'),
         *('--development', 'data/dev/*', '--output', 'sw', '--updates', '1'),
     )
+    (root / 'sw').mkdir()
     cli(*sweep)
     assert len(jsonl(root / 'sw/results.jsonl')) == 1
     before = {p: p.read_bytes() for p in (root / 'sw').rglob('*') if p.is_file()}
