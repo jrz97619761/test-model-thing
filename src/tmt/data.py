@@ -1,4 +1,4 @@
-"""Raw byte file selection and document loading."""
+"""Raw byte file selection and document loading. Please keep any data related work or helpers in this module!!!"""
 
 from __future__ import annotations
 
