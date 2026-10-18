@@ -8,12 +8,12 @@ import pytest
 
 TOPICS = ('init', 'train', 'sweep', 'evaluate', 'benchmark', 'generate', 'help')
 BASE_ARGV = {
-    'train': 'train --data train.bin --run invalid',
+    'train': 'train --data train.bin --run invalid --seed 11',
     'sweep': 'sweep --grid grid.json --data train.bin --development dev.bin '
-    '--output invalid',
+    '--output invalid --seed 11',
     'evaluate': 'evaluate missing.safetensors --data dev.bin --output score.json',
-    'generate': 'generate missing.safetensors --prompt x --output sample.bin',
-    'benchmark': 'benchmark missing.safetensors --cola-data missing.tsv',
+    'generate': 'generate missing.safetensors --prompt x --output sample.bin --seed 11',
+    'benchmark': 'benchmark missing.safetensors --cola-data missing.tsv --seed 11',
 }
 RUN_NAME = 'run must be one relative folder name'
 EVAL_PAIR = 'eval-data and eval-every must be used together'
@@ -52,11 +52,11 @@ INVALID_OPTION_VALUES = {  # id: (extra options, expected stderr fragment)
     'benchmark-epochs': ('--epochs 0', 'epochs must be positive with cola-data'),
 }
 HELP_ERRORS = {  # id: (argv, expected stderr fragment)
-    'unknown-topic-command': ('help nonexistent', 'unknown help topic'),
-    'unknown-topic-after-long-option': ('--help nonexistent', 'unknown help topic'),
-    'unknown-topic-after-short-option': ('-h nonexistent', 'unknown help topic'),
-    'unknown-topic-before-help-option': ('nonexistent --help', 'unknown help topic'),
-    'two-topics': ('help train sweep', 'help accepts at most one topic'),
+    'unknown-command': ('help nonexistent', 'unknown help topic'),
+    'unknown-after-long-help': ('--help nonexistent', 'unknown help topic'),
+    'unknown-after-short-help': ('-h nonexistent', 'unknown help topic'),
+    'unknown-before-help': ('nonexistent --help', 'unknown help topic'),
+    'multiple-topics': ('help train sweep', 'help accepts at most one topic'),
 }
 ARGUMENT_ERRORS = {
     'checkpoint-with-run': '--run bad model.safetensors',
@@ -70,16 +70,16 @@ SWEEP_MISSING = (
 )
 OPERATIONS = 'new load generate train train-sample sweep sweep-sample benchmark'.split()
 SEED_ARGV = {  # even cases get seed -1, odd cases get 2**64
-    'train-seed': 'train --data missing/* --run invalid --seed',
-    'train-sample-seed': 'train --data missing/* --run invalid --sample-seed',
+    'train-seed': 'train --data missing/* --run valid --seed',
+    'train-sample-seed': 'train --data missing/* --run valid --seed 11 --sample-seed',
     'resume-seed': 'train missing.safetensors --data missing/* --resume --seed',
     'resume-sample-seed': 'train missing.safetensors --data missing/* --resume '
-    '--sample-seed',
+    '--seed 11 --sample-seed',
     'generate-seed': 'generate missing.safetensors --prompt X --output protected.bin '
     '--seed',
     'benchmark-seed': 'benchmark missing.safetensors --seed',
     'sweep-seed': SWEEP_MISSING + ' --seed',
-    'sweep-sample-seed': SWEEP_MISSING + ' --sample-seed',
+    'sweep-sample-seed': SWEEP_MISSING + ' --seed 11 --sample-seed',
 }
 
 
@@ -142,6 +142,80 @@ def test_model_free_commands(
         assert result.stdout == manual
 
 
+@pytest.mark.parametrize(
+    'argv',
+    [
+        ['--help'],
+        ['-h'],
+        ['help'],
+        ['help', 'train'],
+        ['help', '--help'],
+        ['--help', 'train'],
+        ['-h', 'train'],
+        ['train', '--help'],
+        ['train', '-h'],
+        ['train', '--data', 'missing/*', '--help'],
+    ],
+    ids=[
+        'index-long', 'index-short', 'manual', 'manual-topic', 'help-topic',
+        'long-topic', 'short-topic', 'command-long', 'command-short',
+        'command-with-options',
+    ],
+)
+def test_help_forms_need_no_setup(tmp_path, model_free_cli, manual, argv):
+    result = model_free_cli(*argv)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ''
+    assert 'Traceback' not in result.stderr
+    assert list(tmp_path.iterdir()) == []
+    if argv in (['--help'], ['-h']):
+        assert result.stdout.startswith('usage: tmt')
+        assert '## init' not in result.stdout
+    elif argv == ['help']:
+        assert result.stdout == manual
+    else:
+        topic = 'help' if argv[:2] == ['help', '--help'] else 'train'
+        section = manual.split(f'## {topic}\n', 1)[1].split('\n## ', 1)[0]
+        assert result.stdout == f'## {topic}\n{section.rstrip()}\n'
+
+
+@pytest.mark.parametrize(
+    ('module', 'argv'),
+    [
+        ('tmt', ['train', '--data', 'missing/*', '--run', 'run']),
+        (
+            'tmt',
+            [
+                'sweep', '--grid', 'grid.json', '--data', 'missing/*',
+                '--development', 'missing/*', '--output', 'sweep',
+            ],
+        ),
+        (
+            'tmt',
+            [
+                'generate', 'missing.safetensors', '--prompt', 'x',
+                '--output', 'sample.bin',
+            ],
+        ),
+        ('tmt', ['benchmark', 'missing.safetensors']),
+        ('tmt.benchmark', ['missing.safetensors']),
+    ],
+    ids=['train', 'sweep-with-seed-axis', 'generate', 'benchmark', 'benchmark-module'],
+)
+def test_primary_seed_required_before_import(
+    tmp_path, model_free_cli, module, argv
+):
+    if argv[0] == 'sweep':
+        (tmp_path / 'grid.json').write_text('{"seed": [11, 22]}')
+    result = model_free_cli(*argv, module=module)
+    assert result.returncode == 2
+    assert 'the following arguments are required: --seed' in result.stderr
+    assert result.stdout == ''
+    assert 'Traceback' not in result.stderr
+    expected = ['grid.json'] if argv[0] == 'sweep' else []
+    assert sorted(path.name for path in tmp_path.iterdir()) == expected
+
+
 def test_manual_topics(run_cli, manual):
     from tmt.cli import command_manual
 
@@ -178,7 +252,10 @@ def test_help_errors(run_cli, tmp_path, case):
 
 @pytest.mark.parametrize('case', ARGUMENT_ERRORS)
 def test_argument_errors(workspace, run_cli, case):
-    argv = ['train', '--data', 'train.bin', *ARGUMENT_ERRORS[case].split()]
+    argv = [
+        'train', '--data', 'train.bin', '--seed', '11',
+        *ARGUMENT_ERRORS[case].split(),
+    ]
     assert run_cli(*argv)[0] == 2
 
 
@@ -197,34 +274,64 @@ def test_seed_checked_first(run_cli, tmp_path, case):
 
 @pytest.mark.parametrize('operation', OPERATIONS)
 def test_direct_seed_validation(monkeypatch, forbid_call, operation):
-    from tmt import cli
+    from tmt import runtime, validation
     from tmt.benchmark import run
     from tmt.cli import generate, load_model, new_model, sweep, train
 
-    monkeypatch.setattr(cli.validation, 'model_settings', forbid_call)
-    for name in 'load_config load_model new_model train sweep generate'.split():
-        monkeypatch.setattr(cli, name, forbid_call)
+    monkeypatch.setattr(validation, 'model_settings', forbid_call)
+    monkeypatch.setattr(validation, 'checkpoint_header', forbid_call)
+    for name in 'load_config _input_files'.split():
+        monkeypatch.setattr(runtime, name, forbid_call)
+    monkeypatch.setattr(runtime, 'TrainingRun', forbid_call)
     seed = (-1, 2**64, True, 1.5)[OPERATIONS.index(operation) % 4]
-    monkeypatch.setattr('tmt.benchmark.load_model', forbid_call, raising=False)
     calls = {
         'new': lambda: new_model({}, seed),
         'load': lambda: load_model('missing.safetensors', seed),
         'generate': lambda: generate('missing.safetensors', 'X', 'unused.bin', seed),
         'train': lambda: train({}, 'unused/model.safetensors', 'missing/*', seed=seed),
         'train-sample': lambda: train(
-            {}, 'unused/model.safetensors', 'missing/*', sample_seed=seed
+            {}, 'unused/model.safetensors', 'missing/*', seed=11, sample_seed=seed
         ),
         'sweep': lambda: sweep(
             'missing.json', 'missing/*', 'missing/*', 'unused', seed=seed
         ),
         'sweep-sample': lambda: sweep(
-            'missing.json', 'missing/*', 'missing/*', 'unused', sample_seed=seed
+            'missing.json', 'missing/*', 'missing/*', 'unused', seed=11,
+            sample_seed=seed,
         ),
         'benchmark': lambda: run(
             'missing.safetensors', model=SimpleNamespace(freeze=forbid_call), seed=seed
         ),
     }
-    with pytest.raises(ValueError, match='seed must be'):
+    message = 'sample-seed must be' if operation.endswith('-sample') else 'seed must be'
+    with pytest.raises(ValueError, match=message):
+        calls[operation]()
+
+
+@pytest.mark.parametrize(
+    ('operation', 'error', 'message'),
+    [
+        ('train', ValueError, 'seed must be an integer'),
+        ('sweep', ValueError, 'seed must be an integer'),
+        ('generate', ValueError, 'seed must be an integer'),
+        ('benchmark', TypeError, 'seed'),
+    ],
+)
+def test_direct_primary_seed_is_required(operation, error, message):
+    from tmt.benchmark import run
+    from tmt.cli import generate, sweep, train
+
+    calls = {
+        'train': lambda: train({}, 'unused/model.safetensors', 'missing/*'),
+        'sweep': lambda: sweep(
+            'missing.json', 'missing/*', 'missing/*', 'unused'
+        ),
+        'generate': lambda: generate(
+            'missing.safetensors', 'x', 'unused.bin'
+        ),
+        'benchmark': lambda: run('missing.safetensors'),
+    }
+    with pytest.raises(error, match=message):
         calls[operation]()
 
 
@@ -288,6 +395,41 @@ def test_documents_budget(tmp_path, limit, expected):
     assert list(documents(str(tmp_path / '*.bin'), limit)) == expected
 
 
+def test_byte_files_rejects_unmatched_selection(tmp_path):
+    from tmt.data import ByteFiles
+
+    with pytest.raises(FileNotFoundError, match='no files matched'):
+        ByteFiles(str(tmp_path / '*.bin'))
+
+
+def test_byte_files_rejects_directory_selection(tmp_path):
+    from tmt.data import ByteFiles
+
+    directory = tmp_path / 'selected'
+    directory.mkdir()
+    with pytest.raises(IsADirectoryError):
+        ByteFiles(str(directory))
+
+
+def test_byte_files_documents_keep_empty_files_and_share_budget(tmp_path):
+    from tmt.data import ByteFiles
+
+    (tmp_path / 'a.bin').write_bytes(b'')
+    (tmp_path / 'b.bin').write_bytes(b'abcd')
+    (tmp_path / 'c.bin').write_bytes(b'')
+    (tmp_path / 'd.bin').write_bytes(b'efgh')
+    files = ByteFiles(str(tmp_path / '*.bin'))
+
+    assert [Path(path).name for path in files.paths] == [
+        'a.bin',
+        'b.bin',
+        'c.bin',
+        'd.bin',
+    ]
+    assert list(files.documents()) == [b'', b'abcd', b'', b'efgh']
+    assert list(files.documents(6)) == [b'', b'abcd', b'', b'ef']
+
+
 def test_generate(checkpoint, tmp_path, capsys):
     from tmt.cli import generate
 
@@ -307,7 +449,7 @@ def test_generate(checkpoint, tmp_path, capsys):
     assert second_path.read_bytes() == second
     assert path.read_bytes() == original
     first_path.write_bytes(b'previous sample')
-    assert generate(path, 'The ', first_path, count=0) == b''
+    assert generate(path, 'The ', first_path, seed=11, count=0) == b''
     assert first_path.read_bytes() == b''
     for seed in (0, 2**64 - 1):
         assert len(generate(path, 'X', tmp_path / 'sample.bin', seed, 1)) == 1
@@ -317,7 +459,7 @@ def test_generate_temperature_floor(checkpoint, tmp_path):
     from tmt.cli import generate
 
     path, output = checkpoint.path, tmp_path / 'sample.bin'
-    minimum = generate(path, 'The ', output, count=2, temperature=0.1)
+    minimum = generate(path, 'The ', output, seed=11, count=2, temperature=0.1)
     for temperature in (0, 0.05):
         assert generate(path, 'The ', output, 11, 2, temperature) == minimum
 
@@ -350,7 +492,10 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
     (root / 'data/train/tiny.bin').write_bytes(b'abcd')
     (root / 'data/dev/tiny.bin').write_bytes(b'wxyz')
     progress = cli(
-        *('train', '--data', 'data/train/*', '--run', 'first', '--updates', '3'),
+        *(
+            'train', '--data', 'data/train/*', '--run', 'first',
+            '--updates', '3', '--seed', '11',
+        ),
         *('--log-every', '2', '--sample-every', '2', '--sample-bytes', '4'),
         *('--sample-prompt', 'A', '--sample-seed', '7', '--eval-data', 'data/dev/*'),
         *('--eval-every', '2', '--eval-max-bytes', '3'),
@@ -372,7 +517,7 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
         {'completed_updates': 2, 'input_bytes': 3, 'targets': 2},
         {'completed_updates': 3, 'input_bytes': 3, 'targets': 2},
     ]
-    model, settings = load_model(checkpoint)
+    model, settings = load_model(checkpoint, 11)
     expected = {'dim': 4, 'layers': 1, 'spread': 4}
     assert {k: settings[k] for k in expected} == expected
     assert model.optimizer.state['step'].item() == 3
@@ -396,7 +541,7 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
         *('train', str(checkpoint), '--data', 'data/resume/*', '--resume'),
         *('--updates', '2', '--seed', '99', '--ce-only'),
     )
-    assert load_model(checkpoint)[0].optimizer.state['step'].item() == 5
+    assert load_model(checkpoint, 99)[0].optimizer.state['step'].item() == 5
     record = json.loads(manifest.read_text())
     assert set(record) == manifest_fields
     expected = {
@@ -422,14 +567,17 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
     assert json.loads((root / 'score.json').read_text())['targets'] == 3
     cli(
         *('generate', str(checkpoint), '--prompt', 'The ', '--output', 'sample.bin'),
-        *('--bytes', '4'),
+        *('--bytes', '4', '--seed', '11'),
     )
     assert len((root / 'sample.bin').read_bytes()) == 4
-    assert '390 targets' in cli('benchmark', str(checkpoint)).stdout
+    assert '390 targets' in cli('benchmark', str(checkpoint), '--seed', '11').stdout
     (root / 'g.json').write_text('{"seed": [11]}')
     sweep = (
         *('sweep', '--grid', 'g.json', '--data', 'data/train/*'),
-        *('--development', 'data/dev/*', '--output', 'sw', '--updates', '1'),
+        *(
+            '--development', 'data/dev/*', '--output', 'sw', '--updates', '1',
+            '--seed', '11',
+        ),
     )
     (root / 'sw').mkdir()
     cli(*sweep)

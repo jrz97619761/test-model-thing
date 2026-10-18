@@ -290,10 +290,10 @@ def test_cola_rows_rejected_before_model_work(
     data.write_text(
         'src\t1\tx\talpha\n\nsrc\t0\tx\tbeta\n' + text + '\n', encoding='utf-8'
     )
-    monkeypatch.setattr('tmt.cli.load_model', forbid_call)
+    monkeypatch.setattr('tmt.checkpoint.load_checkpoint', forbid_call)
     monkeypatch.setattr('tmt.benchmark.evaluate', forbid_call)
     with pytest.raises(ValueError, match=f'CoLA TSV {error}'):
-        run('missing.safetensors', data=str(data), model=None)
+        run('missing.safetensors', data=str(data), model=None, seed=11)
 
 
 def test_cola_preserves_sentence_bytes(tmp_path):
@@ -327,11 +327,11 @@ def test_run_rejects_bad_cola_inputs(
     data = tmp_path / 'cola.tsv'
     if rows:
         data.write_text(rows + '\n', encoding='utf-8')
-    monkeypatch.setattr('tmt.cli.load_model', forbid_call)
+    monkeypatch.setattr('tmt.checkpoint.load_checkpoint', forbid_call)
     monkeypatch.setattr('tmt.benchmark.evaluate', forbid_call)
     model = SimpleNamespace(freeze=forbid_call)
     with pytest.raises(error, match=message):
-        run('missing.safetensors', epochs, data=str(data), model=model)
+        run('missing.safetensors', epochs, data=str(data), model=model, seed=11)
 
 
 @pytest.mark.parametrize(
@@ -339,7 +339,10 @@ def test_run_rejects_bad_cola_inputs(
     [
         (['--help'], 0, None),
         (
-            ['missing.safetensors', '--cola-data', 'cola.tsv', '--epochs', '1'],
+            [
+                'missing.safetensors', '--cola-data', 'cola.tsv', '--epochs', '1',
+                '--seed', '11',
+            ],
             1,
             'CoLA TSV row 3 has 3 columns; expected 4',
         ),

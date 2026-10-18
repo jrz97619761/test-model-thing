@@ -11,9 +11,9 @@
     ],
     "block": "rtu"
   },
-  "seed": 11,
   "trainable_parameters": null,
   "temporal_gradient": null,
+  "seed": 11,
   "data_glob": "data/train/*",
   "data_files": [],
   "updates": 1000,
@@ -22,9 +22,9 @@
   "completed_updates": 0,
   "resume": false,
   "initial_optimizer_step": 0,
-  "started_at": null,
   "sample": null,
-  "last_checkpoint": null,
   "evaluation": null,
-  "status": "running"
+  "started_at": null,
+  "status": "running",
+  "last_checkpoint": null
 }

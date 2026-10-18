@@ -1,4 +1,5 @@
 import json
+import inspect
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,7 @@ def test_load_config(tmp_path, monkeypatch):
     from tmt.main import Model
 
     defaults = load_config()
+    assert config.load_config() == defaults
     expected = {**config.MODEL_DEFAULTS, 'bound': list(config.MODEL_DEFAULTS['bound'])}
     assert defaults == expected
     parameters = inspect.signature(Model).parameters
@@ -234,6 +236,8 @@ def test_init_writes_templates(run_cli, tmp_path, manifest_fields):
     expected = {
         'config': saved,
         'seed': 11,
+        'trainable_parameters': None,
+        'temporal_gradient': None,
         'data_glob': 'data/train/*',
         'data_files': [],
         'updates': 1000,
@@ -242,6 +246,9 @@ def test_init_writes_templates(run_cli, tmp_path, manifest_fields):
         'resume': False,
         'initial_optimizer_step': 0,
         'started_at': None,
+        'sample': None,
+        'evaluation': None,
+        'status': 'running',
         'last_checkpoint': None,
     }
     assert {name: template[name] for name in expected} == expected
@@ -316,6 +323,14 @@ def test_checkpoint_rejects_invalid_files(checkpoint, fault, parts):
         )
         mx.save_safetensors(path, arrays, metadata=metadata)
     with pytest.raises(ValueError) as error:
-        load_model(path)
+        load_model(path, 11)
     for part in parts:
         assert part in str(error.value), f'message is missing {part!r}: {error.value}'
+
+
+def test_checkpoint_loader_names_require_same_seed_signature():
+    from tmt.checkpoint import load_checkpoint, load_model
+
+    checkpoint_signature = inspect.signature(load_checkpoint)
+    assert inspect.signature(load_model) == checkpoint_signature
+    assert checkpoint_signature.parameters['seed'].default is inspect.Parameter.empty

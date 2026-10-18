@@ -223,7 +223,7 @@ def run(
     data: str | None = None,
     *,
     model=None,
-    seed=11,
+    seed: int,
 ):
     validation.seed(seed)
 
@@ -238,9 +238,9 @@ def run(
             )
 
     if model is None:
-        from tmt.cli import load_model
+        from tmt.checkpoint import load_checkpoint
 
-        model, _ = load_model(path, seed)
+        model, _ = load_checkpoint(path, seed)
     model.freeze()
     byte_scores = evaluate(model, BYTE_DOCUMENTS, CONTEXT_WINDOWS)
     print(f'Frozen BPB: {byte_scores["bpb"]:.6f} ({byte_scores["targets"]} targets)')
@@ -272,7 +272,7 @@ def run(
         loss = nn.losses.cross_entropy(choice[None, :], mx.array([target])).mean()
         return loss, choice
 
-    print(f'CoLA feature convention: {model.blocks[-1].feature_convention}')
+    print(f'CoLA feature convention: {model.blocks[-1].feature_source}')
     print('Starting benchmark.')
 
     epoch_scores = []
@@ -291,6 +291,6 @@ def run(
             )
     return {
         'byte_scores': byte_scores,
-        'feature_convention': model.blocks[-1].feature_convention,
+        'feature_convention': model.blocks[-1].feature_source,
         'epochs': epoch_scores,
     }

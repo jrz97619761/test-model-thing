@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+FIXTURE = Path(__file__).parent / 'fixtures' / 'rtu-baseline.json'
+
 
 def _array_values(array):
     import mlx.core as mx
@@ -135,9 +137,6 @@ def test_train_step(monkeypatch, model_factory):
     assert mx.random.uniform(shape=(1,)).item() == expected
     assert math.isfinite(float(loss.item()))
     assert int(model.optimizer.state['step'].item()) == 2
-
-
-FIXTURE = Path(__file__).parent / 'fixtures' / 'rtu-baseline.json'
 
 
 def test_rtu_baseline():

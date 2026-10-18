@@ -6,6 +6,37 @@ from types import SimpleNamespace
 
 import pytest
 
+INVALID_GRIDS = {
+    'sweep grid must be a JSON object': {
+        'null-grid': None,
+        'array-grid': [],
+        'string-grid': 'dim',
+    },
+    "sweep grid field 'dim' must be a nonempty array": {
+        'scalar-dim-axis': {'dim': 4},
+        'null-dim-axis': {'dim': None},
+        'object-dim-axis': {'dim': {}},
+        'empty-dim-axis': {'dim': []},
+        'boolean-dim-axis': {'dim': True},
+        'existing-empty-output': {'dim': []},
+    },
+    "sweep grid field 'seed' must be a nonempty array": {
+        'empty-seed-axis': {'dim': [4], 'seed': []}
+    },
+    'model config.dim must be a positive integer': {'zero-dimension': {'dim': [4, 0]}},
+    'sweep grid seed must be an integer': {
+        'boolean-seed': {'seed': [11, True]},
+        'string-seed': {'seed': [11, '22']},
+    },
+    'sweep grid seed must be between': {
+        'negative-seed': {'seed': [11, -1]},
+        'seed-overflow': {'seed': [11, 2**64]},
+    },
+    'model config.bound must be two integers': {'bound': {'bound': [30]}},
+    'model config.block must be one of': {'block': {'block': ['unknown-block']}},
+    "model config has unknown field 'unknown'": {'unknown-field': {'unknown': [1]}},
+}
+
 
 def test_train_visits_byte_pairs_and_resumes(
     monkeypatch, capsys, tiny_settings, tmp_path, snapshot
@@ -78,6 +109,9 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
 
     assert len(records) == 2
     assert set(records[0]) == manifest_fields
+    example_path = Path(__file__).resolve().parents[1] / 'examples' / 'run.example.json'
+    example = json.loads(example_path.read_text())
+    assert list(records[0]) == list(example)
     assert records[0]['trainable_parameters'] == trained.count()
     assert records[0]['temporal_gradient'] == trained.temporal_gradient
     fixed = {
@@ -185,7 +219,7 @@ def test_short_documents_fail_the_run(tiny_settings, tmp_path):
     (tmp_path / 'data' / 'one.bin').write_bytes(b'x')
     checkpoint = tmp_path / 'run' / 'model.safetensors'
     with pytest.raises(ValueError, match='no training targets found in data pass'):
-        train(tiny_settings, checkpoint, str(tmp_path / 'data/*.bin'), updates=1)
+        train(tiny_settings, checkpoint, str(tmp_path / 'data/*.bin'), updates=1, seed=11)
 
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
     expected = {
@@ -205,12 +239,57 @@ def test_checkpoint_every_500_updates(capsys, tiny_settings, tmp_path):
     data = tmp_path / 'train.bin'
     data.write_bytes(b'abcdefghijklmnopqrstuvwxyz')
     checkpoint = tmp_path / 'model.safetensors'
-    train(tiny_settings, checkpoint, str(data), updates=501, log_every=1000)
+    train(tiny_settings, checkpoint, str(data), updates=501, seed=11, log_every=1000)
 
     lines = capsys.readouterr().out.splitlines()
     assert [line for line in lines if line.startswith('saved checkpoint:')] == [
         f'saved checkpoint: {checkpoint}, updates: 500',
         f'saved checkpoint: {checkpoint}, updates: 501',
+    ]
+
+
+def test_post_update_action_order(monkeypatch, tmp_path):
+    from tmt.runtime import MonitorOptions, TrainingRun
+
+    run = TrainingRun(
+        settings={},
+        path=tmp_path / 'model.safetensors',
+        pattern='data/*',
+        updates=500,
+        seed=11,
+        ce_only=False,
+        resume=False,
+        log_every=500,
+        monitor=MonitorOptions(
+            sample_every=500,
+            eval_data='held-out/*',
+            eval_every=500,
+        ),
+    )
+    run.completed = 500
+    events = []
+    monkeypatch.setattr(run, 'report_loss', lambda: events.append('loss'))
+    monkeypatch.setattr(
+        run,
+        'consume_terminal_byte',
+        lambda byte: events.append(('terminal-byte', byte)),
+    )
+    monkeypatch.setattr(run, 'report_sample', lambda: events.append('sample'))
+    monkeypatch.setattr(
+        run, 'report_evaluation', lambda: events.append('evaluation')
+    )
+    monkeypatch.setattr(
+        run, 'save_checkpoint', lambda: events.append('checkpoint')
+    )
+
+    run.after_update(True, 255)
+
+    assert events == [
+        'loss',
+        ('terminal-byte', 255),
+        'sample',
+        'evaluation',
+        'checkpoint',
     ]
 
 
@@ -253,10 +332,10 @@ def test_loss_rows(
     with monkeypatch.context() as patches:
         ticks = iter([0, 2, 4, 6])
         patches.setattr(Model, 'train_step', capture)
-        patches.setattr('tmt.cli.time.perf_counter', lambda: next(ticks))
+        patches.setattr('tmt.runtime.time.perf_counter', lambda: next(ticks))
         options = {'ce_only': ce_only, 'log_every': interval}
         checkpoint = tmp_path / 'model.safetensors'
-        model = train(tiny_settings, checkpoint, str(data), updates, **options)
+        model = train(tiny_settings, checkpoint, str(data), updates, seed=11, **options)
     stdout = capsys.readouterr().out
     rows = jsonl(tmp_path / 'manifest/loss.jsonl')
 
@@ -298,7 +377,7 @@ def test_loss_rows(
     assert run_json['log_every'] == interval
     reference = tmp_path / 'reference/model.safetensors'
     assert snapshot(model) == snapshot(
-        train(tiny_settings, reference, str(data), updates, ce_only=ce_only)
+        train(tiny_settings, reference, str(data), updates, seed=11, ce_only=ce_only)
     )
 
 
@@ -308,14 +387,19 @@ def test_train_command_run_folders(monkeypatch, run_cli, tiny_settings, tmp_path
     command_calls = []
     monkeypatch.setattr('tmt.cli.train', lambda *a, **k: command_calls.append((a, k)))
 
-    run_cli('train', '--data', 'train.bin', '--run', 'named', '--updates', '3')
+    run_cli(
+        'train', '--data', 'train.bin', '--run', 'named', '--updates', '3',
+        '--seed', '11',
+    )
     named = Path('runs/named/model.safetensors')
     assert command_calls[-1][0][:2] == (tiny_settings, named)
     # The patched function replaces run-folder creation.
     (tmp_path / 'runs' / 'named').mkdir(parents=True)
-    run_cli('train', '--data', 'train.bin')
+    run_cli('train', '--data', 'train.bin', '--seed', '11')
     assert command_calls[-1][0][1].parent.parent == Path('runs')
-    assert run_cli('train', '--data', 'train.bin', '--run', 'named')[0] == 1
+    assert run_cli(
+        'train', '--data', 'train.bin', '--run', 'named', '--seed', '11'
+    )[0] == 1
 
 
 def test_sampling(tiny_settings, tmp_path, snapshot, jsonl):
@@ -415,38 +499,6 @@ def test_interval_evaluation(tiny_settings, tmp_path, snapshot, jsonl):
     assert [row['completed_updates'] for row in exact_rows] == [2, 4]
 
 
-INVALID_GRIDS = {
-    'sweep grid must be a JSON object': {
-        'null-grid': None,
-        'array-grid': [],
-        'string-grid': 'dim',
-    },
-    "sweep grid field 'dim' must be a nonempty array": {
-        'scalar-dim-axis': {'dim': 4},
-        'null-dim-axis': {'dim': None},
-        'object-dim-axis': {'dim': {}},
-        'empty-dim-axis': {'dim': []},
-        'boolean-dim-axis': {'dim': True},
-        'existing-empty-output': {'dim': []},
-    },
-    "sweep grid field 'seed' must be a nonempty array": {
-        'empty-seed-axis': {'dim': [4], 'seed': []}
-    },
-    'model config.dim must be a positive integer': {'zero-dimension': {'dim': [4, 0]}},
-    'sweep grid seed must be an integer': {
-        'boolean-seed': {'seed': [11, True]},
-        'string-seed': {'seed': [11, '22']},
-    },
-    'sweep grid seed must be between': {
-        'negative-seed': {'seed': [11, -1]},
-        'seed-overflow': {'seed': [11, 2**64]},
-    },
-    'model config.bound must be two integers': {'bound': {'bound': [30]}},
-    'model config.block must be one of': {'block': {'block': ['unknown-block']}},
-    "model config has unknown field 'unknown'": {'unknown-field': {'unknown': [1]}},
-}
-
-
 @pytest.mark.parametrize(
     ('grid', 'message', 'existing'),
     [
@@ -460,7 +512,7 @@ def test_sweep_rejects_invalid_grid(
 ):
     from tmt.cli import sweep
 
-    monkeypatch.setattr('tmt.cli.train', forbid_call)
+    monkeypatch.setattr('tmt.runtime.train', forbid_call)
     (tmp_path / 'model.json').write_text(json.dumps(tiny_settings))
     (tmp_path / 'grid.json').write_text(json.dumps(grid))
     output = tmp_path / 'sweep'
@@ -468,7 +520,7 @@ def test_sweep_rejects_invalid_grid(
         output.mkdir()
     with pytest.raises(ValueError, match=message):
         args = ('missing/*', 'missing/*', output, tmp_path / 'model.json')
-        sweep(tmp_path / 'grid.json', *args, updates=1)
+        sweep(tmp_path / 'grid.json', *args, updates=1, seed=11)
     if existing:
         assert list(output.iterdir()) == []
     else:
@@ -502,11 +554,11 @@ def test_sweep_failure_records_status(
         return result
 
     with monkeypatch.context() as patches, pytest.raises(error_type):
-        patches.setattr('tmt.cli.train', next_train)
+        patches.setattr('tmt.runtime.train', next_train)
         patches.setattr(
             'tmt.benchmark.evaluate', lambda *args: {'targets': 1, 'bpb': 8.0}
         )
-        sweep(grid, str(data), str(data), output, config, updates=1)
+        sweep(grid, str(data), str(data), output, config, updates=1, seed=11)
 
     record = json.loads((output / 'sweep.json').read_text())
     expected = {'status': status, 'current_run': 2, 'completed_runs': 1}
@@ -518,9 +570,9 @@ def test_sweep_failure_records_status(
     assert first_row['trainable_parameters'] == 7
     assert first_row['temporal_gradient'] == ['rtu-v1']
     with pytest.raises(FileExistsError, match='choose a new output folder'):
-        sweep(grid, str(data), str(data), output, config, updates=1)
+        sweep(grid, str(data), str(data), output, config, updates=1, seed=11)
     assert (output / 'results.jsonl').read_bytes() == rows
-    sweep(grid, str(data), str(data), tmp_path / 'retry', config, updates=1)
+    sweep(grid, str(data), str(data), tmp_path / 'retry', config, updates=1, seed=11)
     retry = json.loads((tmp_path / 'retry/sweep.json').read_text())
     assert retry['status'] == 'complete'
 
@@ -530,7 +582,7 @@ def test_sweep_argument_dispatch(monkeypatch, run_cli):
     monkeypatch.setattr(
         'tmt.cli.sweep', lambda *args, **kwargs: command_calls.append((args, kwargs))
     )
-    args = ['sweep', '--grid', 'grid.json', '--data', 'train/*']
+    args = ['sweep', '--grid', 'grid.json', '--data', 'train/*', '--seed', '11']
     args += ['--development', 'dev/*', '--output', 'runs/grid']
     monitoring = ['--sample-every', '2', '--sample-bytes', '3']
     monitoring += ['--eval-data', 'held-out/*', '--eval-every', '5']

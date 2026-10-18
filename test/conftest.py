@@ -76,7 +76,7 @@ def jsonl():
 
 @pytest.fixture
 def manifest_fields():
-    return {  # the 17 keys of manifest/run.json
+    return {
         'config',
         'seed',
         'data_glob',

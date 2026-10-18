@@ -1,11 +1,17 @@
 # TMT command manual
-This manual describes the installed `tmt` command. Use Python 3.12, 3.13, or 3.14 and install the package with pip. Commands that create a model or use a checkpoint need MLX. Manual requests need no MLX, model, config, data, or checkpoint. Use `-h` or `--help` for the command index or one topic. Use `--version` for package details.
+Use Python 3.12, 3.13, or 3.14. Install TMT with pip. Most commands need MLX. Help and version requests do not.
 
 File errors and invalid values print a short error to stderr and exit with code `1`. Argument errors exit with code `2`.
 
-All `--seed`, `--sample-seed`, and sweep grid seed values must be integers from `0` to `18446744073709551615`, inclusive. Boolean grid values are invalid. The CLI checks these limits before model work or run folder creation, even when a seed has no effect.
+`--seed`, `--sample-seed`, and sweep grid seed values must be integers from `0` to `18446744073709551615`, inclusive. Boolean grid seed values are invalid. The CLI checks these limits before model work or run folder creation, even when a seed has no effect.
 
-Sample prompts must be nonempty. Sample byte counts and evaluation byte budgets must be positive. These requirements also apply when samples or interval evaluation are off.
+Direct Python seed values use the same limits. `tmt.cli.train()`, `tmt.cli.sweep()`, `tmt.cli.generate()`, `tmt.benchmark.run()`, `tmt.checkpoint.new_model()`, and `tmt.checkpoint.load_checkpoint()` require a primary seed. Pass `seed=...` to `tmt.benchmark.run()`. The separate `sample_seed` argument remains optional and defaults to `11` for `train()` and `sweep()`.
+
+Train, sweep, generate, and benchmark require `--seed N`. The seed sets Python's `random` seed and MLX's random seed when TMT creates or loads a model. Train and sweep use it to set file order.
+
+A sweep requires its base seed even when the grid has a `seed` field. Each grid seed sets one candidate's seed. `--sample-seed` sets the sample seed. Evaluate loads with seed `0` and does not sample.
+
+`--sample-prompt` must be nonempty. `--sample-bytes` and `--eval-max-bytes` must be positive. These checks apply when sample or interval evaluation options are off.
 
 Relative paths use the current directory. The CLI does not search parent folders for files or runs. Data globs select raw files. The CLI sorts paths that match. Each file is one document, and the model resets at each document boundary. The CLI reads file contents as bytes, adds no separators, and does not decode them as text.
 
@@ -29,29 +35,21 @@ model = Model(**settings)
 
 ## Wheel distribution
 
-The project uses Setuptools to build wheels. It supports Python 3.12, 3.13, and 3.14.
-The `build` tool is a maintainer tool. It is not a runtime dependency of TMT.
+The project uses Setuptools and supports Python 3.12, 3.13, and 3.14. The `build` tool is for maintainers. It is not a runtime dependency.
 
-From the repository root, use an active virtual environment with a supported Python version.
-Install the build tool:
+From the repository root, use an active virtual environment with a supported Python version. Install the build tool:
 
 ```bash
 python -m pip install build
 ```
 
-Build a wheel, then remove the temporary build artifacts:
+Build a wheel:
 
 ```bash
 python -m build --wheel
-rm -rf build src/*.egg-info
 ```
 
-The first command creates `dist/test_model_thing-1.0.0-py3-none-any.whl` for the current project version.
-It uses an isolated build environment and the Setuptools requirement in `pyproject.toml`.
-It does not install TMT or publish files.
-The second command removes `build/` and direct `src/*.egg-info` artifacts. Run it after success or failure.
-It keeps `dist/`, `.venv/`, source code, and installed `.dist-info` metadata.
-Run these commands from the repository root when no other build or package installation uses the checkout.
+The build creates `dist/test_model_thing-1.0.0-py3-none-any.whl` for the current project version. It uses an isolated build environment and does not install TMT or publish files.
 
 Install that wheel in the target virtual environment:
 
@@ -61,22 +59,9 @@ tmt --version
 tmt help
 ```
 
-Use the wheel path that matches the project version. From another directory, supply the full path to the wheel.
-Pip installs the `mlx` dependency and creates the `tmt` command.
-The wheel contains the Python package, `commands.md`, and `.dist-info` metadata.
-The metadata supplies the version, dependencies, and command entry point.
-MLX needs a compatible runtime even though the TMT wheel contains only Python code and package resources.
+Use the wheel path that matches the project version. From another directory, supply its full path. Pip installs the declared dependencies and creates the `tmt` command. The wheel contains the Python package and `commands.md`. MLX needs a compatible runtime.
 
-Setuptools can create `src/test_model_thing.egg-info` during a wheel build or an editable installation.
-This generated folder contains source metadata. It is not an `.egg` distribution.
-Git ignores this folder. The `rm` command removes it after the build. Setuptools can recreate it after removal.
-
-Keep installed `.dist-info` metadata because pip and the version command use it.
-Use `python -m build --wheel` for distribution, not legacy egg commands such as `setup.py bdist_egg`.
-
-For local development, use `python -m pip install -e '.[test]'`.
-This editable installation uses source files directly and installs pytest.
-The normal `python -m pip install .` workflow also remains available.
+For local development, use `python -m pip install -e '.[test]'`. This installs pytest and uses the source files directly. You can also install the package with `python -m pip install .`.
 
 ## Blocks
 
@@ -93,8 +78,10 @@ Each factory creates one fresh block per layer. The block call uses `enc`, `x`, 
 It returns `(x_next, next_state, aux)`. `x_next` has shape `[dim]` and keeps the model dtype.
 `next_state` is a dictionary with exactly the field names in `state_fields`.
 
-`Block` exposes `state_fields`, `trace_fields`, `temporal_gradient`, and `feature_convention` as properties without setters.
-Override their getters in a custom block. For example:
+`Block` exposes `state_fields`, `trace_fields`, `temporal_gradient`, and `feature_source` as properties without setters.
+The allowed `temporal_gradient` values are `one-step-autodiff` and `rtu-v1`.
+The allowed `feature_source` values are `final-output` and `recurrent-state`.
+Override these getters in a custom block. For example:
 
 ```python
 @property
@@ -106,6 +93,8 @@ These properties describe the block contract. Instance assignment and deletion r
 
 `state_fields` lists public arrays that advance on each byte. `trace_fields` lists public arrays for temporal gradient history.
 Blocks create these fields before optimizer setup and freeze them as runtime state.
+`Block.__init__()` does not inspect subclass arrays. `validate()` checks the completed block after its constructor returns.
+
 All block parameters stay in the normal MLX parameter tree.
 Block state shapes stay fixed for the life of the model.
 
@@ -128,18 +117,21 @@ The model commits candidate state after differentiation, or after a frozen step.
 Frozen steps advance only `state_fields`. They do not change traces, weights, or optimizer state.
 
 The helper names are `snapshot_state()`, `restore_state()`, `commit_state()`, and `eval_state()`.
-Blocks use these helpers to copy, restore, commit, and evaluate declared fields.
+Blocks use these helpers to copy, restore, commit, and evaluate declared fields. `Model` calls `validate()` after it creates each block.
+Direct calls to `restore_state()`, `commit_state()`, or `validate_result()` build the runtime schema on first use.
 The model applies snapshot, restore, and evaluation across all blocks.
 Evaluation and samples restore state after success or error.
 
-`features(x)` returns one `[dim]` vector for CoLA. The default uses `x` with feature convention `final-output`.
-RTU uses its recurrent state with feature convention `recurrent-state`.
-The CoLA result records `feature_convention` because MCC can change with the feature choice.
+`features(x)` returns one `[dim]` vector for CoLA. The `feature_source` property reports `final-output` when the block uses `x`.
+RTU uses its recurrent state and reports `recurrent-state`.
+The CoLA result keeps the JSON key `feature_convention` for compatibility.
 
 Resolved model config and checkpoint metadata both contain `block`.
 The checkpoint loader requires every current config field and the `block` selector.
 An earlier checkpoint without this selector fails validation, even if its version marker is `1`.
 The loader does not add a default for missing metadata. Create fresh artifacts with this release.
+
+Use `tmt.checkpoint.load_checkpoint(path, seed)` to load a checkpoint in Python. It returns `(model, settings)`. Both `tmt.checkpoint` and `tmt.cli` export `load_checkpoint`. Both modules keep `load_model(path, seed)` as a compatibility name.
 
 ## init
 
@@ -180,7 +172,7 @@ Train a model on raw-byte documents and save a strict model and optimizer checkp
 
 ### Syntax
 ```text
-tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--updates N] [--log-every N] [--seed N] [--ce-only] [--sample-every N] [--sample-prompt TEXT] [--sample-seed N] [--sample-bytes N] [--eval-data GLOB --eval-every N] [--eval-max-bytes N]
+tmt train [CHECKPOINT] --data GLOB --seed N [--config PATH | --resume] [--run NAME] [--updates N] [--log-every N] [--ce-only] [--sample-every N] [--sample-prompt TEXT] [--sample-seed N] [--sample-bytes N] [--eval-data GLOB --eval-every N] [--eval-max-bytes N]
 ```
 
 ### Requirements and options
@@ -192,7 +184,7 @@ tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--up
 - `--run NAME` creates `runs/NAME/`. Use one relative folder name without path separators. Empty names, `.` and `..` are invalid. Do not combine it with `CHECKPOINT` or `--resume`. Use `CHECKPOINT` for an arbitrary path.
 - `--updates N` sets target-byte optimizer updates. The default is `1000`. Use a positive value. On resume, this count is added to the saved optimizer step.
 - `--log-every N` sets the progress interval in updates during a train run. The default is `100`. Use a positive value.
-- `--seed N` sets the Python and MLX seeds. The default is `11`.
+- `--seed N` sets the Python and MLX seeds. This option is required.
 - `--ce-only` uses next-byte cross entropy. Without it, the command uses the full TMT objective.
 - `--sample-every N` writes a sample after each N completed updates. The command writes no samples by default. Use a positive value.
 - `--sample-prompt TEXT` sets the nonempty sample prompt. The default is `The `.
@@ -211,8 +203,8 @@ tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--up
 4. To add updates, pass that path and `--resume`.
 
 ```bash
-tmt train --data 'data/train/*' --run first --updates 3
-tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 2
+tmt train --data 'data/train/*' --run first --updates 3 --seed 11
+tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 2 --seed 11
 ```
 
 ### Behavior and files
@@ -293,7 +285,7 @@ Run each combination in a JSON grid in sequence, then score each trained model o
 
 ### Syntax
 ```text
-tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH] [--updates N] [--log-every N] [--seed N] [--ce-only] [--max-bytes N] [--sample-every N] [--sample-prompt TEXT] [--sample-seed N] [--sample-bytes N] [--eval-data GLOB --eval-every N] [--eval-max-bytes N]
+tmt sweep --grid PATH --data GLOB --development GLOB --output DIR --seed N [--config PATH] [--updates N] [--log-every N] [--ce-only] [--max-bytes N] [--sample-every N] [--sample-prompt TEXT] [--sample-seed N] [--sample-bytes N] [--eval-data GLOB --eval-every N] [--eval-max-bytes N]
 ```
 
 ### Requirements and options
@@ -305,7 +297,7 @@ tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH
 - `--config PATH` selects the base model JSON. The default is `model.json` in the current folder.
 - `--updates N` sets target-byte updates per candidate. The default is `1000`. Use a positive value.
 - `--log-every N` sets the progress interval in updates for each candidate. The default is `100`. Use a positive value.
-- `--seed N` sets the seed when the grid has no `seed` field. The default is `11`.
+- `--seed N` sets the base seed when the grid has no `seed` field. This option is required even when the grid has a `seed` field.
 - `--ce-only` selects next-byte cross entropy. The default objective is full TMT.
 - `--max-bytes N` limits development input to a global prefix across sorted files. The default is `8192` bytes. Use a positive value. Zero and negative values cause an input error.
 - `--sample-every N` writes a sample after each N completed updates for each candidate. The command writes no samples by default. Use a positive value.
@@ -325,7 +317,7 @@ tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH
 4. Read `results.jsonl` and compare each candidate's development BPB.
 
 ```bash
-tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --output runs/sweep --updates 1000
+tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --output runs/sweep --updates 1000 --seed 11
 ```
 
 ### Behavior and files
@@ -346,7 +338,7 @@ Then add the block names and paired seeds to the grid. Keep the base config, dat
 ```bash
 tmt sweep --config research.json --grid ab-grid.json \
   --data 'data/train/*' --development 'data/dev/*' \
-  --output runs/ab-001 --updates 1000
+  --output runs/ab-001 --updates 1000 --seed 11
 ```
 
 Pair result rows by seed and compare every score. A shared seed repeats the RNG start.
@@ -405,8 +397,8 @@ Run the fixed byte benchmark suite. Optionally train a small CoLA classification
 
 ### Syntax
 ```text
-tmt benchmark CHECKPOINT [--cola-data PATH] [--epochs N] [--split FRACTION] [--seed N]
-python -m tmt.benchmark CHECKPOINT [--cola-data PATH] [--epochs N] [--split FRACTION] [--seed N]
+tmt benchmark CHECKPOINT --seed N [--cola-data PATH] [--epochs N] [--split FRACTION]
+python -m tmt.benchmark CHECKPOINT --seed N [--cola-data PATH] [--epochs N] [--split FRACTION]
 ```
 
 The module command uses the same CLI as `tmt benchmark`. Both commands return this section for `--help` without MLX.
@@ -417,7 +409,7 @@ The module command uses the same CLI as `tmt benchmark`. Both commands return th
 - `--cola-data PATH` selects a local four-column CoLA TSV. Labels must be `0` or `1`. Each nonblank row must have exactly four columns and a sentence with at least one non-whitespace character. The command rejects an invalid row with its TSV row number before model load or byte evaluation. Without this option, the command runs only the byte suite.
 - `--epochs N` sets CoLA head epochs. The default is `1`. When you set `--cola-data`, the value must be a positive integer. Epoch count does not change the fixed byte suite.
 - `--split FRACTION` sets the contiguous CoLA train fraction. The default is `0.5`.
-- `--seed N` sets the checkpoint load and CoLA head seed. The default is `11`.
+- `--seed N` sets the checkpoint load and CoLA head seed. This option is required.
 - The benchmark needs MLX. CoLA needs a readable TSV with at least two valid rows. The command does not download data.
 
 ### Workflow
@@ -425,11 +417,11 @@ The module command uses the same CLI as `tmt benchmark`. Both commands return th
 1. Select a checkpoint from a train or sweep run.
 2. Run the fixed byte suite.
 3. To include CoLA, supply a local four-column TSV.
-4. Set `--epochs`, `--split`, or `--seed` only when needed.
+4. Set `--seed` for every benchmark. Set `--epochs` or `--split` when needed.
 
 ```bash
-tmt benchmark runs/first/model.safetensors
-tmt benchmark runs/first/model.safetensors --cola-data data/cola.tsv --epochs 1 --split 0.5
+tmt benchmark runs/first/model.safetensors --seed 11
+tmt benchmark runs/first/model.safetensors --cola-data data/cola.tsv --epochs 1 --split 0.5 --seed 11
 ```
 
 ### Behavior and files
@@ -440,7 +432,7 @@ The loader ignores blank lines and preserves sentence whitespace. TSV row number
 The split is contiguous. Values below 0 or above 1 are clipped to that range. The model weights stay frozen, and only a separate linear classification head receives updates. The command reports train and held-out confusion counts with MCC multiplied by 100. The score range is -100 to 100.
 
 RTU uses recurrent-state features. Other blocks use final-output features by default.
-The benchmark reports `feature_convention` as `recurrent-state` or `final-output` with the CoLA scores.
+The benchmark reports the JSON key `feature_convention` as `recurrent-state` or `final-output` with the CoLA scores.
 
 The benchmark prints results to the terminal. It does not save a report or checkpoint. A missing supplied TSV raises an ordinary file error.
 
@@ -450,7 +442,7 @@ Use a UTF-8 text prompt to produce a fixed number of raw output bytes from a fro
 
 ### Syntax
 ```text
-tmt generate CHECKPOINT --prompt TEXT --output PATH [--seed N] [--bytes N] [--log-every N] [--temperature VALUE]
+tmt generate CHECKPOINT --prompt TEXT --output PATH --seed N [--bytes N] [--log-every N] [--temperature VALUE]
 ```
 
 ### Requirements and options
@@ -458,7 +450,7 @@ tmt generate CHECKPOINT --prompt TEXT --output PATH [--seed N] [--bytes N] [--lo
 - `CHECKPOINT` is required and must pass strict model and optimizer tensor checks.
 - `--prompt TEXT` is required and must not be empty. The command encodes it as UTF-8.
 - `--output PATH` is required. Its parent folder must exist and allow writes.
-- `--seed N` sets the model load and sample seed. The default is `11`.
+- `--seed N` sets the model load and sample seed. This option is required.
 - `--bytes N` sets the output byte count. The default is `512`. Zero writes an empty file. Negative values are invalid.
 - `--log-every N` sets the output progress interval in bytes. The default is `1000`. Use a positive value.
 - `--temperature VALUE` overrides the checkpoint value. The override must be finite and nonnegative. The default uses the checkpoint value.
@@ -520,7 +512,7 @@ tmt --version
 ```
 
 ### Behavior and limits
-`tmt help` prints the complete bundled manual. `tmt help COMMAND` prints one section. `tmt help --help` prints the help section. `tmt --help COMMAND` and `tmt COMMAND --help` print the same section text. The `-h` forms do the same. A help request after other command arguments still prints the manual before the CLI checks those arguments or starts an experiment. It behaves like the man command on any linux shell.
+`tmt help` prints the complete bundled manual. `tmt help COMMAND` prints one section. `tmt help --help` prints the help section. The `--help` and `-h` forms print the same section. A help request after other command arguments prints the manual before the CLI checks those arguments or starts an experiment.
 
 An unknown help topic gives a short parser error and exit code `2`. A manual request does not need a valid file path. The version command reads installed distribution metadata from `test-model-thing`.
 

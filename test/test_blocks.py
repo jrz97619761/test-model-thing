@@ -87,7 +87,7 @@ def make_model(tiny_settings):
 )
 def test_block_contract_properties(block_type, expected):
     block = Block() if block_type is Block else block_type(4, 4)
-    fields = ('state_fields', 'trace_fields', 'temporal_gradient', 'feature_convention')
+    fields = ('state_fields', 'trace_fields', 'temporal_gradient', 'feature_source')
     for field, original in zip(fields, expected):
         assert getattr(block, field) == original, f'{field} getter is wrong'
         replacement = ('replacement',) if isinstance(original, tuple) else 'replacement'
@@ -97,6 +97,52 @@ def test_block_contract_properties(block_type, expected):
             delattr(block, field)
         assert getattr(block, field) == original, f'{field} changed after edits'
         assert field not in block, f'{field} entered the MLX parameter dictionary'
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('temporal_gradient', 'unknown'),
+        ('temporal_gradient', None),
+        ('feature_source', 'unknown'),
+        ('feature_source', None),
+    ],
+    ids=[
+        'unknown-gradient',
+        'non-string-gradient',
+        'unknown-feature',
+        'non-string-feature',
+    ],
+)
+def test_invalid_block_labels(monkeypatch, tiny_settings, field, value):
+    invalid = type('InvalidLabel', (MatrixCache,), {field: property(lambda self: value)})
+    monkeypatch.setitem(BLOCKS, 'invalid-test', invalid)
+    with pytest.raises(ValueError, match=f'block {field} must be one of'):
+        Model(**{**tiny_settings, 'block': 'invalid-test'})
+
+
+@pytest.mark.parametrize('operation', ['commit', 'restore', 'result'])
+def test_layer_value_validation_is_lazy(operation):
+    layer = Layer(4, 4)
+    assert layer._runtime_schema is None
+
+    if operation == 'commit':
+        check = lambda: layer.commit_state({'states': mx.zeros((2,))})
+    elif operation == 'restore':
+        saved = {
+            'states': mx.zeros((2,)),
+            'decaytrace': mx.zeros_like(layer.decaytrace),
+            'embedtrace': mx.zeros_like(layer.embedtrace),
+        }
+        check = lambda: layer.restore_state(saved)
+    else:
+        enc = mx.zeros((4,))
+        output = mx.zeros((4,))
+        check = lambda: layer.validate_result(enc, output, {'states': mx.zeros((2,))})
+
+    with pytest.raises(ValueError, match='retain shape'):
+        check()
+    assert layer._runtime_schema is not None
 
 
 @pytest.mark.parametrize('block', ['rtu', 'matrix-test', 'empty-test'])
@@ -281,7 +327,7 @@ def test_checkpoint_round_trip(block, convention, tmp_path, tiny_settings, snaps
 
     path = tmp_path / 'candidate.safetensors'
     save_checkpoint(path, model, settings)
-    loaded, resolved = load_model(path)
+    loaded, resolved = load_model(path, 11)
 
     assert resolved == settings, 'loaded settings differ from saved settings'
     assert loaded.dim == 4, 'restored model dimension differs'
@@ -290,7 +336,7 @@ def test_checkpoint_round_trip(block, convention, tmp_path, tiny_settings, snaps
     assert snapshot(loaded) == expected
     state = loaded.snapshot_state()
     assert rollout(loaded, b'ABC').shape == (4,)
-    assert loaded.blocks[-1].feature_convention == convention
+    assert loaded.blocks[-1].feature_source == convention
     loaded.restore_state(state)
 
     loaded.train_step(67, 68, False)

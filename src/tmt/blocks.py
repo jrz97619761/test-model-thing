@@ -1,4 +1,5 @@
 import math
+from typing import Any, Literal, TypeAlias, Union
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -7,53 +8,81 @@ from mlx.utils import tree_flatten
 from . import validation
 
 
+FeatureSource: TypeAlias = Literal['final-output', 'recurrent-state']
+TemporalGradient: TypeAlias = Literal['one-step-autodiff', 'rtu-v1']
+GradientValue: TypeAlias = Union[
+    mx.array,
+    dict[str, 'GradientValue'],
+    list['GradientValue'],
+]
+GradientTree: TypeAlias = dict[str, GradientValue]
+RuntimeSchema: TypeAlias = tuple[tuple[str, tuple[int, ...], mx.Dtype], ...]
+
+
 class Block(nn.Module):
-    """Byte-step block with fixed, frozen runtime arrays.
+    """Byte-step block with fixed, frozen runtime arrays."""
 
-    Supports optional temporal gradients.
-    """
+    def __init__(self) -> None:
+        super().__init__()
+        self._runtime_schema: RuntimeSchema | None = None
 
     @property
-    def state_fields(self):
+    def state_fields(self) -> tuple[str, ...]:
         return ()
 
     @property
-    def trace_fields(self):
+    def trace_fields(self) -> tuple[str, ...]:
         return ()
 
     @property
-    def temporal_gradient(self):
+    def temporal_gradient(self) -> TemporalGradient:
         return 'one-step-autodiff'
 
     @property
-    def feature_convention(self):
+    def feature_source(self) -> FeatureSource:
         return 'final-output'
 
-    def validate(self):
+    def validate(self) -> None:
         trainable = dict(tree_flatten(self.trainable_parameters()))
         self._runtime_schema = validation.block_runtime_schema(self, trainable)
 
-    def _validate_values(self, values, fields):
-        validation.block_runtime_values(values, fields, self._runtime_schema)
+    def _validate_values(
+        self, values: dict[str, mx.array], fields: tuple[str, ...]
+    ) -> None:
+        schema = self._runtime_schema
+        if schema is None:
+            self.validate()
+            schema = self._runtime_schema
+        assert schema is not None
+        validation.block_runtime_values(values, fields, schema)
 
-    def validate_result(self, enc, x, state):
+    def validate_result(
+        self, enc: mx.array, x: mx.array, state: dict[str, mx.array]
+    ) -> None:
         validation.block_output(x, enc)
         self._validate_values(state, self.state_fields)
 
-    def reset(self):
+    def reset(self) -> None:
         for name in self.state_fields + self.trace_fields:
             setattr(self, name, mx.zeros_like(getattr(self, name)))
 
-    def probe(self):
+    def probe(self) -> mx.array:
         return mx.array(0.0)
 
-    def adjust_gradients(self, byte, next_state, aux, probe_grad, grads):
+    def adjust_gradients(
+        self,
+        byte: mx.array,
+        next_state: dict[str, mx.array],
+        aux: Any,
+        probe_grad: mx.array,
+        grads: GradientTree,
+    ) -> tuple[GradientTree, mx.array | None, dict[str, mx.array]]:
         return grads, None, {}
 
-    def features(self, x):
+    def features(self, x: mx.array) -> mx.array:
         return x
 
-    def snapshot_state(self):
+    def snapshot_state(self) -> dict[str, mx.array]:
         saved = {
             name: mx.array(getattr(self, name))
             for name in self.state_fields + self.trace_fields
@@ -61,13 +90,17 @@ class Block(nn.Module):
         mx.eval(*saved.values())
         return saved
 
-    def restore_state(self, saved):
+    def restore_state(self, saved: dict[str, mx.array]) -> None:
         self._validate_values(saved, self.state_fields + self.trace_fields)
         for name, value in saved.items():
             setattr(self, name, value)
         self.eval_state()
 
-    def commit_state(self, state, traces=None):
+    def commit_state(
+        self,
+        state: dict[str, mx.array],
+        traces: dict[str, mx.array] | None = None,
+    ) -> None:
         self._validate_values(state, self.state_fields)
         validation.require(
             traces is None or isinstance(traces, dict),
@@ -78,7 +111,7 @@ class Block(nn.Module):
         for name, value in {**state, **(traces or {})}.items():
             setattr(self, name, mx.stop_gradient(value))
 
-    def eval_state(self):
+    def eval_state(self) -> None:
         mx.eval(
             *(getattr(self, name) for name in self.state_fields + self.trace_fields)
         )
@@ -86,22 +119,22 @@ class Block(nn.Module):
 
 class Layer(Block):
     @property
-    def state_fields(self):
+    def state_fields(self) -> tuple[str, ...]:
         return ('states',)
 
     @property
-    def trace_fields(self):
+    def trace_fields(self) -> tuple[str, ...]:
         return ('decaytrace', 'embedtrace')
 
     @property
-    def temporal_gradient(self):
+    def temporal_gradient(self) -> TemporalGradient:
         return 'rtu-v1'
 
     @property
-    def feature_convention(self):
+    def feature_source(self) -> FeatureSource:
         return 'recurrent-state'
 
-    def __init__(self, dim: int, spread: int):
+    def __init__(self, dim: int, spread: int) -> None:
         super().__init__()
         halflives = mx.exp(mx.linspace(0.0, math.log(float(spread)), dim))
         retention = mx.exp(-math.log(2.0) / halflives)
@@ -114,15 +147,24 @@ class Layer(Block):
         self.silu = nn.SiLU()
         self.freeze(keys=['states', 'decaytrace', 'embedtrace'], recurse=False)
 
-    def __call__(self, enc, x, probe):
+    def __call__(
+        self, enc: mx.array, x: mx.array, probe: mx.array
+    ) -> tuple[mx.array, dict[str, mx.array], mx.array]:
         decay = mx.sigmoid(self.decay)
         state = (decay * self.states) + enc + probe
         return x + self.silu(self.weights(self.norm(state))), {'states': state}, decay
 
-    def probe(self):
+    def probe(self) -> mx.array:
         return mx.zeros_like(self.states)
 
-    def adjust_gradients(self, byte, next_state, aux, probe_grad, grads):
+    def adjust_gradients(
+        self,
+        byte: mx.array,
+        next_state: dict[str, mx.array],
+        aux: mx.array,
+        probe_grad: mx.array,
+        grads: GradientTree,
+    ) -> tuple[GradientTree, mx.array | None, dict[str, mx.array]]:
         decay = aux
         c_range = (mx.arange(256) == byte)[:, None].astype(mx.float32)
         decay_embedtrace = self.embedtrace * decay
@@ -135,7 +177,7 @@ class Layer(Block):
             {'decaytrace': decaytrace, 'embedtrace': embedtrace},
         )
 
-    def features(self, x):
+    def features(self, x: mx.array) -> mx.array:
         return self.states
 
 

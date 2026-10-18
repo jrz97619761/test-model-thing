@@ -59,11 +59,11 @@ tmt init
 # Select a tiny model for this example.
 printf '{"dim":4,"layers":1,"spread":4}\n' > model.json
 printf abcd > data/train/tiny.bin
-tmt train --data 'data/train/*' --run first --updates 3
-tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 2
+tmt train --data 'data/train/*' --run first --updates 3 --seed 11
+tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 2 --seed 11
 tmt evaluate runs/first/model.safetensors --data 'data/train/*' --windows 1 2
-tmt generate runs/first/model.safetensors --prompt 'The ' --output sample.bin --bytes 4
-tmt benchmark runs/first/model.safetensors
+tmt generate runs/first/model.safetensors --prompt 'The ' --output sample.bin --bytes 4 --seed 11
+tmt benchmark runs/first/model.safetensors --seed 11
 ```
 
 Fresh train and sweep commands use `model.json` in the current folder by default.
