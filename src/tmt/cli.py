@@ -150,7 +150,11 @@ TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     ),
     (
         ('--seed',),
-        {'type': int, 'required': True, 'help': 'Python and MLX seed'},
+        {
+            'type': int,
+            'required': True,
+            'help': 'model initialization and file-order seed',
+        },
     ),
     (
         ('--ce-only',),
@@ -301,7 +305,7 @@ def build_parser() -> argparse.ArgumentParser:
         '--cola-data', help='optional four-column CoLA TSV; default: byte suite only'
     )
     benchmark.add_argument(
-        '--seed', type=int, required=True, help='model load and CoLA head seed'
+        '--seed', type=int, required=True, help='CoLA head seed'
     )
     generation = commands.add_parser(
         'generate', help='generate a fixed number of bytes'
@@ -316,7 +320,7 @@ def build_parser() -> argparse.ArgumentParser:
         '--output', required=True, help='raw-byte output file without the prompt'
     )
     generation.add_argument(
-        '--seed', type=int, required=True, help='model load and sample seed'
+        '--seed', type=int, required=True, help='sample seed'
     )
     generation.add_argument(
         '--bytes', type=int, default=512, help='number of output bytes, default: 512'

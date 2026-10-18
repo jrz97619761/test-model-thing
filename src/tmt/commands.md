@@ -7,9 +7,9 @@ File errors and invalid values print a short error to stderr and exit with code 
 
 Direct Python seed values use the same limits. `tmt.cli.train()`, `tmt.cli.sweep()`, `tmt.cli.generate()`, `tmt.benchmark.run()`, `tmt.checkpoint.new_model()`, and `tmt.checkpoint.load_checkpoint()` require a primary seed. Pass `seed=...` to `tmt.benchmark.run()`. The separate `sample_seed` argument remains optional and defaults to `11` for `train()` and `sweep()`.
 
-Train, sweep, generate, and benchmark require `--seed N`. The seed sets Python's `random` seed and MLX's random seed when TMT creates or loads a model. Train and sweep use it to set file order.
+Train, sweep, generate, and benchmark require `--seed N`. Fresh model creation sets Python's `random` seed and MLX's random seed. Train and sweep use a separate seeded Python RNG for file order. Checkpoint load preserves the caller's Python and MLX RNG state, also after a load error.
 
-A sweep requires its base seed even when the grid has a `seed` field. Each grid seed sets one candidate's seed. `--sample-seed` sets the sample seed. Evaluate loads with seed `0` and does not sample.
+A sweep requires its base seed even when the grid has a `seed` field. Each grid seed sets one candidate's seed. `--sample-seed` sets the sample seed. Evaluate does not sample or change the caller's RNG state.
 
 `--sample-prompt` must be nonempty. `--sample-bytes` and `--eval-max-bytes` must be positive. These checks apply when sample or interval evaluation options are off.
 
@@ -184,7 +184,7 @@ tmt train [CHECKPOINT] --data GLOB --seed N [--config PATH | --resume] [--run NA
 - `--run NAME` creates `runs/NAME/`. Use one relative folder name without path separators. Empty names, `.` and `..` are invalid. Do not combine it with `CHECKPOINT` or `--resume`. Use `CHECKPOINT` for an arbitrary path.
 - `--updates N` sets target-byte optimizer updates. The default is `1000`. Use a positive value. On resume, this count is added to the saved optimizer step.
 - `--log-every N` sets the progress interval in updates during a train run. The default is `100`. Use a positive value.
-- `--seed N` sets the Python and MLX seeds. This option is required.
+- `--seed N` sets the model initialization and file-order seed. This option is required.
 - `--ce-only` uses next-byte cross entropy. Without it, the command uses the full TMT objective.
 - `--sample-every N` writes a sample after each N completed updates. The command writes no samples by default. Use a positive value.
 - `--sample-prompt TEXT` sets the nonempty sample prompt. The default is `The `.
@@ -219,7 +219,7 @@ A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp ru
 | `config` | Complete model settings for this invocation, with `block`. Resume uses checkpoint settings. |
 | `trainable_parameters` | Count of trainable tensor elements before a full-model freeze. This count excludes runtime state and traces. |
 | `temporal_gradient` | Ordered list of temporal-gradient labels, one for each block in the layer stack. |
-| `seed` | Python and MLX seed for this invocation. |
+| `seed` | Model initialization and file-order seed for this invocation. |
 | `data_glob` | The train glob as supplied. Relative globs use the invocation directory. |
 | `data_files` | All matched absolute paths, in the shuffled order for each data pass. |
 | `updates` | Requested target-byte optimizer updates for this invocation. Resume adds this budget to the saved optimizer step. |
@@ -258,7 +258,9 @@ At fresh-run start, `last_checkpoint` is null. Resume starts with the input chec
 The command prints the run folder, seed, config, and successful checkpoint saves.
 At each progress interval, it prints completed updates, total optimizer step, objective, mean loss, latest loss, and update speed.
 It always prints the final loss.
-It saves every 500 updates and at the end. It does not save on interrupt. The last successful checkpoint remains on disk.
+It saves every 500 updates and at the end. Ctrl-C requests a stop after the active update and its post-update actions. The trainer saves a checkpoint, records status `interrupted`, and exits with the interrupt. An update failure preserves the last successful checkpoint.
+
+Checkpoint saves use a temporary file in the checkpoint directory. A successful save atomically replaces the destination and preserves its file permissions. A failed write preserves the previous checkpoint.
 
 When `--sample-every` is set, the command samples from frozen weights at each interval.
 It preserves block state, temporal traces, and global random state for the train run.
@@ -409,7 +411,7 @@ The module command uses the same CLI as `tmt benchmark`. Both commands return th
 - `--cola-data PATH` selects a local four-column CoLA TSV. Labels must be `0` or `1`. Each nonblank row must have exactly four columns and a sentence with at least one non-whitespace character. The command rejects an invalid row with its TSV row number before model load or byte evaluation. Without this option, the command runs only the byte suite.
 - `--epochs N` sets CoLA head epochs. The default is `1`. When you set `--cola-data`, the value must be a positive integer. Epoch count does not change the fixed byte suite.
 - `--split FRACTION` sets the contiguous CoLA train fraction. The default is `0.5`.
-- `--seed N` sets the checkpoint load and CoLA head seed. This option is required.
+- `--seed N` sets the CoLA head seed. This option is required.
 - The benchmark needs MLX. CoLA needs a readable TSV with at least two valid rows. The command does not download data.
 
 ### Workflow
@@ -450,7 +452,7 @@ tmt generate CHECKPOINT --prompt TEXT --output PATH --seed N [--bytes N] [--log-
 - `CHECKPOINT` is required and must pass strict model and optimizer tensor checks.
 - `--prompt TEXT` is required and must not be empty. The command encodes it as UTF-8.
 - `--output PATH` is required. Its parent folder must exist and allow writes.
-- `--seed N` sets the model load and sample seed. This option is required.
+- `--seed N` sets the sample seed. This option is required.
 - `--bytes N` sets the output byte count. The default is `512`. Zero writes an empty file. Negative values are invalid.
 - `--log-every N` sets the output progress interval in bytes. The default is `1000`. Use a positive value.
 - `--temperature VALUE` overrides the checkpoint value. The override must be finite and nonnegative. The default uses the checkpoint value.

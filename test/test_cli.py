@@ -482,6 +482,44 @@ def test_evaluate_command(workspace, checkpoint, run_cli):
     assert 'at least one target' in stderr
 
 
+def test_train_sigint_saves_checkpoint(workspace, snapshot):
+    import signal
+    import subprocess
+    import sys
+    from tmt.checkpoint import load_checkpoint
+    from tmt.runtime import train
+
+    script = """
+import os
+import signal
+from tmt.cli import main
+from tmt.main import Model
+
+update = Model.updategrads
+def interrupt(model, grads):
+    os.kill(os.getpid(), signal.SIGINT)
+    return update(model, grads)
+Model.updategrads = interrupt
+main(['train', '--data', 'train.bin', '--run', 'interrupted',
+      '--seed', '11', '--updates', '3'])
+"""
+    result = subprocess.run(
+        [sys.executable, '-c', script], cwd=workspace,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == -signal.SIGINT, result.stderr
+    checkpoint = workspace / 'runs/interrupted/model.safetensors'
+    assert 'saved checkpoint:' in result.stdout
+    record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
+    assert record['status'] == 'interrupted'
+    assert record['completed_updates'] == 1
+    loaded, settings = load_checkpoint(checkpoint, 11)
+    expected = train(
+        settings, workspace / 'reference/model.safetensors', 'train.bin', 1, 11
+    )
+    assert snapshot(loaded) == snapshot(expected)
+
+
 def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
     from tmt.cli import load_model
 

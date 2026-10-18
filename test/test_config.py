@@ -328,6 +328,149 @@ def test_checkpoint_rejects_invalid_files(checkpoint, fault, parts):
         assert part in str(error.value), f'message is missing {part!r}: {error.value}'
 
 
+@pytest.mark.parametrize('exists', [False, True], ids=['new', 'existing'])
+@pytest.mark.parametrize('failure', ['write', 'interrupt', 'sync', 'replace'])
+def test_checkpoint_failure_preserves_destination(
+    monkeypatch, checkpoint, exists, failure
+):
+    import mlx.core as mx
+    from tmt import checkpoint as storage
+
+    path = checkpoint.path if exists else checkpoint.path.with_name('new.safetensors')
+    original = path.read_bytes() if exists else None
+    files = set(path.parent.iterdir())
+    error = KeyboardInterrupt if failure == 'interrupt' else OSError
+
+    def fail_write(destination, *args, **kwargs):
+        Path(destination).write_bytes(b'partial')
+        raise error('injected write failure')
+
+    def fail(*args, **kwargs):
+        raise error('injected checkpoint failure')
+
+    if failure in ('write', 'interrupt'):
+        monkeypatch.setattr(mx, 'save_safetensors', fail_write)
+    else:
+        monkeypatch.setattr(
+            storage.os, 'fsync' if failure == 'sync' else 'replace', fail
+        )
+
+    with pytest.raises(error):
+        storage.save_checkpoint(path, checkpoint.model, checkpoint.settings)
+    assert set(path.parent.iterdir()) == files
+    if exists:
+        assert path.read_bytes() == original
+    else:
+        assert not path.exists()
+
+
+@pytest.mark.parametrize('mode', [0o200, 0o600, 0o640, 0o644, 0o660])
+def test_checkpoint_replaces_existing_file(checkpoint, snapshot, mode):
+    import stat
+    from tmt.checkpoint import load_checkpoint, save_checkpoint
+
+    original = checkpoint.path.read_bytes()
+    checkpoint.path.chmod(mode)
+    checkpoint.model.train_step(65, 66, False)
+    save_checkpoint(checkpoint.path, checkpoint.model, checkpoint.settings)
+    assert stat.S_IMODE(checkpoint.path.stat().st_mode) == mode
+    checkpoint.path.chmod(0o600)
+    assert checkpoint.path.read_bytes() != original
+    loaded, _ = load_checkpoint(checkpoint.path, 11)
+    assert snapshot(loaded) == snapshot(checkpoint.model)
+    assert list(checkpoint.path.parent.iterdir()) == [checkpoint.path]
+
+
+def test_checkpoint_permission_failure_preserves_destination(monkeypatch, checkpoint):
+    import stat
+    from tmt import checkpoint as storage
+
+    checkpoint.path.chmod(0o640)
+    original = checkpoint.path.read_bytes()
+    files = set(checkpoint.path.parent.iterdir())
+
+    def fail(*args, **kwargs):
+        raise OSError('injected permission failure')
+
+    monkeypatch.setattr(storage.os, 'chmod', fail)
+    with pytest.raises(OSError, match='injected permission failure'):
+        storage.save_checkpoint(checkpoint.path, checkpoint.model, checkpoint.settings)
+    assert checkpoint.path.read_bytes() == original
+    assert stat.S_IMODE(checkpoint.path.stat().st_mode) == 0o640
+    assert set(checkpoint.path.parent.iterdir()) == files
+
+
+@pytest.mark.parametrize(
+    'failure', [None, 'constructor', 'read', 'validation', 'interrupt']
+)
+def test_checkpoint_load_preserves_rng(monkeypatch, checkpoint, failure):
+    import random
+    import mlx.core as mx
+    from tmt import checkpoint as storage
+
+    if failure == 'constructor':
+        create = storage.new_model
+
+        def fail(settings, seed):
+            create(settings, seed)
+            raise ValueError('injected constructor failure')
+
+        monkeypatch.setattr(storage, 'new_model', fail)
+    elif failure in ('read', 'interrupt'):
+        def fail(*args, **kwargs):
+            error = KeyboardInterrupt if failure == 'interrupt' else ValueError
+            raise error('injected tensor read failure')
+
+        monkeypatch.setattr(mx, 'load', fail)
+    elif failure == 'validation':
+        arrays = dict(checkpoint.arrays)
+        arrays.pop('m.decoder.stop.bias')
+        mx.save_safetensors(checkpoint.path, arrays, metadata=checkpoint.metadata)
+
+    random.seed(817)
+    random.random()
+    python_state = random.getstate()
+    expected_python = random.random()
+    random.setstate(python_state)
+    mx.random.seed(913)
+    pending = mx.random.uniform(shape=(3,))
+    mlx_state = mx.array(mx.random.state[0])
+    mx.eval(mlx_state)
+    expected_mlx = mx.random.normal(shape=(5,))
+    mx.random.state[0][...] = mlx_state
+
+    if failure is None:
+        storage.load_checkpoint(checkpoint.path, 11)
+    else:
+        error = KeyboardInterrupt if failure == 'interrupt' else ValueError
+        with pytest.raises(error):
+            storage.load_checkpoint(checkpoint.path, 11)
+    assert random.getstate() == python_state
+    assert mx.array_equal(mx.random.state[0], mlx_state).item()
+    assert random.random() == expected_python
+    assert mx.array_equal(mx.random.normal(shape=(5,)), expected_mlx).item()
+    expected_pending = mx.random.uniform(
+        shape=(3,), key=mx.random.split(mx.random.key(913))[1]
+    )
+    assert mx.array_equal(pending, expected_pending).item()
+
+
+def test_checkpoint_load_preserves_compiled_rng(checkpoint):
+    import mlx.core as mx
+    from tmt.checkpoint import load_checkpoint
+
+    draw = mx.compile(
+        lambda: mx.random.uniform(shape=(5,)),
+        inputs=[mx.random.state],
+        outputs=[mx.random.state],
+    )
+    mx.random.seed(817)
+    expected = draw().tolist()
+    mx.random.seed(817)
+    load_checkpoint(checkpoint.path, 11)
+    assert draw().tolist() == expected
+
+
 def test_checkpoint_loader_names_require_same_seed_signature():
     from tmt.checkpoint import load_checkpoint, load_model
 

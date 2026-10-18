@@ -1,5 +1,6 @@
 import json
 import math
+import signal
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,6 +80,103 @@ def test_train_visits_byte_pairs_and_resumes(
     steps = [int(m.optimizer.state['step'].item()) for m in (first, second, resumed)]
     assert steps == [3, 3, 5], 'training and resume optimizer steps differ'
     assert snapshot(first) == snapshot(second)
+
+
+def test_resume_file_order_uses_seed(tiny_settings, tmp_path):
+    import random
+    from tmt.checkpoint import new_model, save_checkpoint
+    from tmt.runtime import MonitorOptions, TrainingRun
+
+    data = tmp_path / 'data'
+    data.mkdir()
+    for index in range(8):
+        (data / f'{index}.bin').write_bytes(b'ab')
+    checkpoint = tmp_path / 'model.safetensors'
+    save_checkpoint(checkpoint, new_model(tiny_settings, 11), tiny_settings)
+    runs = []
+    for unrelated_seed in (7, 37):
+        random.seed(unrelated_seed)
+        run = TrainingRun(
+            settings=None, path=checkpoint, pattern=str(data / '*.bin'),
+            updates=1, seed=19, ce_only=False, resume=True, log_every=100,
+            monitor=MonitorOptions(),
+        )
+        run.setup()
+        runs.append(run.files)
+    expected = sorted(str(path) for path in data.iterdir())
+    random.Random(19).shuffle(expected)
+    assert runs == [expected, expected]
+
+
+@pytest.mark.parametrize('resume', [False, True], ids=['fresh', 'resume'])
+@pytest.mark.parametrize(
+    'stage', ['update', 'terminal', 'sample', 'evaluation', 'save']
+)
+def test_sigint_saves_complete_update(
+    monkeypatch, tiny_settings, tmp_path, snapshot, jsonl, resume, stage
+):
+    import mlx.core as mx
+    from tmt.checkpoint import load_checkpoint
+    from tmt.main import Model
+    from tmt.runtime import TrainingRun, train
+
+    data = tmp_path / 'train.bin'
+    data.write_bytes(b'ab')
+    checkpoint = tmp_path / 'run/model.safetensors'
+    reference = tmp_path / 'reference/model.safetensors'
+    if resume:
+        train(tiny_settings, checkpoint, str(data), 2, 11)
+        train(tiny_settings, reference, str(data), 2, 11)
+    settings = None if resume else tiny_settings
+    expected = train(settings, reference, str(data), 1, 11, resume=resume)
+    targets = {
+        'update': (Model, 'updategrads'),
+        'terminal': (TrainingRun, 'consume_terminal_byte'),
+        'sample': (TrainingRun, 'report_sample'),
+        'evaluation': (TrainingRun, 'report_evaluation'),
+        'save': (mx, 'save_safetensors'),
+    }
+    owner, name = targets[stage]
+    original = getattr(owner, name)
+
+    def interrupt(*args, **kwargs):
+        signal.raise_signal(signal.SIGINT)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, interrupt)
+    handler = signal.getsignal(signal.SIGINT)
+    with pytest.raises(KeyboardInterrupt):
+        train(
+            settings, checkpoint, str(data), 1 if stage == 'save' else 3, 11,
+            resume=resume, sample_every=1 if stage == 'sample' else None,
+            sample_bytes=2, eval_data=str(data) if stage == 'evaluation' else None,
+            eval_every=1 if stage == 'evaluation' else None,
+        )
+    assert signal.getsignal(signal.SIGINT) == handler
+    loaded, _ = load_checkpoint(checkpoint, 99)
+    assert snapshot(loaded) == snapshot(expected)
+    record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
+    assert record['status'] == 'interrupted'
+    assert record['completed_updates'] == 1
+    assert record['last_checkpoint'] == str(checkpoint.resolve())
+    (row,) = jsonl(checkpoint.parent / 'manifest/loss.jsonl')
+    assert row['optimizer_step'] == (3 if resume else 1)
+    assert row['completed_updates'] == 1
+
+
+def test_train_in_worker_thread(tiny_settings, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from tmt.runtime import train
+
+    data = tmp_path / 'train.bin'
+    data.write_bytes(b'ab')
+    handler = signal.getsignal(signal.SIGINT)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        model = executor.submit(
+            train, tiny_settings, tmp_path / 'model.safetensors', str(data), 1, 11
+        ).result(timeout=30)
+    assert model.optimizer.state['step'].item() == 1
+    assert signal.getsignal(signal.SIGINT) == handler
 
 
 def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
@@ -177,8 +275,10 @@ def test_manifest_after_failure(
 
     monkeypatch.setattr(Model, 'train_step', fail)
     settings = None if resume else tiny_settings
+    handler = signal.getsignal(signal.SIGINT)
     with pytest.raises(error):
         train(settings, checkpoint, str(data), 3, 17, True, resume)
+    assert signal.getsignal(signal.SIGINT) == handler
 
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
     expected = {

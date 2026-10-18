@@ -7,6 +7,8 @@ import itertools
 import json
 import math
 import random
+import signal
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -120,6 +122,7 @@ class TrainingRun:
     last_report: float = 0.0
     sample_dir: Path = field(init=False)
     status: RunStatus = 'failed'
+    interrupted: bool = False
     mx: Any = None
 
     def setup(self) -> None:
@@ -137,7 +140,7 @@ class TrainingRun:
             self.model, self.settings = load_checkpoint(self.path, self.seed)
         else:
             self.model = new_model(self.settings, self.seed)
-        random.shuffle(self.files)
+        random.Random(self.seed).shuffle(self.files)
 
         self.checkpoint = Path(self.path)
         self.checkpoint.parent.mkdir(parents=True, exist_ok=not self.new_run)
@@ -288,6 +291,12 @@ class TrainingRun:
         self.model.step(self.mx.array(byte), frozen=True)
         self.model.eval_state()
 
+    def check_interrupt(self) -> None:
+        """Save at a complete update boundary after a SIGINT request."""
+        if self.interrupted:
+            self.save_checkpoint()
+            raise KeyboardInterrupt
+
     def after_update(self, end: bool, terminal_byte: int) -> None:
         """Run every action triggered by an optimizer update in stable order."""
         if self.completed % self.log_every == 0:
@@ -311,6 +320,7 @@ class TrainingRun:
         """Visit the selected files once, in the run's fixed shuffled order."""
         before_pass = self.completed
         for filename in self.files:
+            self.check_interrupt()
             data = Path(filename).read_bytes()
             if not data:
                 continue
@@ -333,10 +343,12 @@ class TrainingRun:
                 for name, value in components.items():
                     self.component_sums[name] = self.component_sums.get(name, 0.0) + value
                 self.after_update(end, data[-1])
+                self.check_interrupt()
                 if self.completed >= self.updates:
                     break
             if self.completed >= self.updates:
                 break
+        self.check_interrupt()
         if self.completed == before_pass:
             raise ValueError('no training targets found in data pass')
 
@@ -354,6 +366,17 @@ class TrainingRun:
         """Run data passes and preserve the run's failure and interrupt status."""
         if self.record is None:
             raise RuntimeError('training run must be set up before it can run')
+
+        def request_interrupt(signum, frame):
+            self.interrupted = True
+
+        previous_handler = (
+            signal.getsignal(signal.SIGINT)
+            if threading.current_thread() is threading.main_thread()
+            else None
+        )
+        if previous_handler is not None:
+            signal.signal(signal.SIGINT, request_interrupt)
         try:
             self.metrics.write_text('')
             (self.manifest_dir / 'samples.jsonl').write_text('')
@@ -370,13 +393,20 @@ class TrainingRun:
                 and self.completed != self.evaluated
             ):
                 self.report_evaluation()
+            self.check_interrupt()
             self.save_checkpoint()
+            if self.interrupted:
+                raise KeyboardInterrupt
             self.status = 'complete'
         except KeyboardInterrupt:
             self.status = 'interrupted'
             raise
         finally:
-            self.finalize()
+            try:
+                self.finalize()
+            finally:
+                if previous_handler is not None:
+                    signal.signal(signal.SIGINT, previous_handler)
 
         print(f'updates: {self.completed}, checkpoint: {self.checkpoint}')
         return self.model

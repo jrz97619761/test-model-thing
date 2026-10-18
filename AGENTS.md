@@ -95,6 +95,7 @@ Run these checks from the repository root for code changes:
 
 - Preserve strict checkpoint validation for metadata, tensor names, shapes, and dtypes.
 - Checkpoints contain model and optimizer tensors with version-1 model metadata.
+- Checkpoint loads preserve the caller's Python and MLX RNG state after success or failure. File order uses a separate seeded RNG.
 - Treat format changes as compatibility changes. Provide explicit migration behavior when the task requires a new format.
 - Resume restores checkpoint settings and optimizer tensors. It starts a new data pass without the previous cursor or RNG state.
 - Do not describe resume as exact continuation. The trainer resets recurrent state and traces at each document.
@@ -103,8 +104,8 @@ Run these checks from the repository root for code changes:
 - Use tiny fixtures, such as `dim=4`, `layers=1`, `spread=4`, and a few updates, for smoke checks.
 - Do not start large train runs or download datasets unless the task requires them.
 - Keep datasets, checkpoints, generated samples, and build artifacts out of commits.
-- The trainer saves every 500 updates and at normal completion. Ctrl-C does not save a checkpoint.
-- Direct checkpoint writes can leave partial files after a process failure. Preserve the last successful checkpoint.
+- The trainer saves every 500 updates and at normal completion. Ctrl-C requests a stop and a save after a complete update. Do not checkpoint partial updates.
+- Checkpoint saves write a temporary file in the destination directory, then atomically replace the destination. Preserve the last successful checkpoint after a failed save.
 
 ## Documentation and handoff
 

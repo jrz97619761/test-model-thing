@@ -71,7 +71,7 @@ Fresh train and sweep commands use `model.json` in the current folder by default
 
 Resume uses checkpoint settings and adds updates with a new data pass. It does not restore the file cursor or RNG state.
 
-The trainer saves every 500 updates and at normal completion. Ctrl-C does not save. Keep the last successful checkpoint.
+The trainer saves every 500 updates and at normal completion. Ctrl-C requests a stop after the active update and its post-update actions. The trainer then saves a checkpoint.
 
 Read the [command manual](src/tmt/commands.md) or use `tmt help`.
 Use [train](src/tmt/commands.md#train) for run and resume options.

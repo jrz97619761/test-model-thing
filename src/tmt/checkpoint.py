@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import random
+import stat
+import tempfile
 from os import PathLike
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from . import validation
@@ -55,7 +59,24 @@ def save_checkpoint(
     tensors = _flatten(model.parameters(), 'm')
     tensors.update(_flatten(model.optimizer.state, 'o'))
     mx.eval(model.parameters(), model.optimizer.state)
-    mx.save_safetensors(path, tensors, metadata={'tmt': raw})
+    path = Path(path)
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=f'.{path.name}.', suffix='.safetensors', delete=False
+    ) as file:
+        temporary = Path(file.name)
+    try:
+        mx.save_safetensors(temporary, tensors, metadata={'tmt': raw})
+        with temporary.open('rb') as file:
+            try:
+                mode = stat.S_IMODE(path.stat().st_mode)
+            except FileNotFoundError:
+                pass
+            else:
+                temporary.chmod(mode)
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def load_checkpoint(
@@ -66,21 +87,28 @@ def load_checkpoint(
 
     envelope = validation.checkpoint_header(path)
     settings = validation.metadata(envelope['__metadata__']['tmt'])
-    model = new_model(settings, seed)
-    model.optimizer.init(model.trainable_parameters())
-    expected = _flatten(model.parameters(), 'm')
-    expected.update(_flatten(model.optimizer.state, 'o'))
+    python_state = random.getstate()
+    mlx_state = mx.array(mx.random.state[0])
     try:
-        tensors = mx.load(path)
-    except Exception as error:
-        raise ValueError(f'invalid checkpoint: {error}') from error
-    validation.checkpoint_arrays(tensors, expected)
+        model = new_model(settings, seed)
+        model.optimizer.init(model.trainable_parameters())
+        expected = _flatten(model.parameters(), 'm')
+        expected.update(_flatten(model.optimizer.state, 'o'))
+        try:
+            tensors = mx.load(path)
+        except Exception as error:
+            raise ValueError(f'invalid checkpoint: {error}') from error
+        validation.checkpoint_arrays(tensors, expected)
 
-    model.update(_unflatten(tensors, 'm'))
-    model.optimizer.state = _unflatten(tensors, 'o')
-    model.compiled = None
-    mx.eval(model.parameters(), model.optimizer.state)
-    return model, settings
+        model.update(_unflatten(tensors, 'm'))
+        model.optimizer.state = _unflatten(tensors, 'o')
+        model.compiled = None
+        mx.eval(model.parameters(), model.optimizer.state)
+        return model, settings
+    finally:
+        random.setstate(python_state)
+        # Preserve the RNG state object captured by compiled MLX functions.
+        mx.random.state[0][...] = mlx_state
 
 
 def load_model(
