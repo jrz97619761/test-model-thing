@@ -122,7 +122,7 @@ def command_manual(topic: str | None = None) -> str:
     return heading + section.rstrip() + '\n'
 
 
-ArgumentSpec = tuple[tuple[str, ...], dict[str, Any]]
+type ArgumentSpec = tuple[tuple[str, ...], dict[str, Any]]
 
 TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     (

@@ -226,10 +226,11 @@ def test_benchmark_run(checkpoint, tmp_path, capsys):
     output = capsys.readouterr().out
     assert '(390 targets)' in output
     assert '(104 targets)' in output
-    assert result['feature_convention'] == 'recurrent-state'
+    assert set(result) == {'byte_scores', 'feature_source', 'epoch_scores'}
+    assert result['feature_source'] == 'recurrent-state'
     assert 'CoLA feature convention: recurrent-state' in output
     for partition in ('train', 'held'):
-        score = result['epochs'][0][partition]
+        score = result['epoch_scores'][0][partition]
         assert sum(score[key] for key in ('tp', 'tn', 'fp', 'fn')) == 2
 
     scores = result['byte_scores']
@@ -238,7 +239,7 @@ def test_benchmark_run(checkpoint, tmp_path, capsys):
     assert scores['targets'] == 390
     assert scores['common_targets'] == 104
     assert tuple(item['window'] for item in scores['windows']) == CONTEXT_WINDOWS
-    held = result['epochs'][0]['held']
+    held = result['epoch_scores'][0]['held']
     denominator = math.sqrt(
         (held['tp'] + held['fp'])
         * (held['tp'] + held['fn'])
@@ -253,6 +254,14 @@ def test_benchmark_run(checkpoint, tmp_path, capsys):
     assert held['mcc'] == pytest.approx(expected_mcc, rel=0, abs=5e-8)
     assert mcc(1, 1, 0, 0) == 100.0
     assert state() == before
+
+
+def test_benchmark_run_without_cola(checkpoint):
+    from tmt.benchmark import run
+
+    result = run(str(checkpoint.path), model=checkpoint.model, seed=11)
+    assert set(result) == {'byte_scores', 'epoch_scores'}
+    assert result['epoch_scores'] == []
 
 
 @pytest.mark.parametrize(

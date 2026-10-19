@@ -7,7 +7,7 @@ from os import PathLike
 from typing import Any, Literal, TypedDict
 
 
-RunStatus = Literal['running', 'complete', 'failed', 'interrupted']
+type RunStatus = Literal['running', 'complete', 'failed', 'interrupted']
 
 
 class RunManifest(TypedDict):

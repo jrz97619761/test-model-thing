@@ -1,5 +1,5 @@
 import math
-from typing import Any, Literal, TypeAlias, Union
+from typing import Any, Literal
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -8,15 +8,11 @@ from mlx.utils import tree_flatten
 from . import validation
 
 
-FeatureSource: TypeAlias = Literal['final-output', 'recurrent-state']
-TemporalGradient: TypeAlias = Literal['one-step-autodiff', 'rtu-v1']
-GradientValue: TypeAlias = Union[
-    mx.array,
-    dict[str, 'GradientValue'],
-    list['GradientValue'],
-]
-GradientTree: TypeAlias = dict[str, GradientValue]
-RuntimeSchema: TypeAlias = tuple[tuple[str, tuple[int, ...], mx.Dtype], ...]
+type FeatureSource = Literal['final-output', 'recurrent-state']
+type TemporalGradient = Literal['one-step-autodiff', 'rtu-v1']
+type GradientValue = mx.array | dict[str, GradientValue] | list[GradientValue]
+type GradientTree = dict[str, GradientValue]
+type RuntimeSchema = tuple[tuple[str, tuple[int, ...], mx.Dtype], ...]
 
 
 class Block(nn.Module):

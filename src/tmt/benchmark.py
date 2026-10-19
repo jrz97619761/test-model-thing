@@ -256,7 +256,7 @@ def run(
         )
 
     if data is None:
-        return {'byte_scores': byte_scores, 'epochs': []}
+        return {'byte_scores': byte_scores, 'epoch_scores': []}
 
     split = int(len(rows) * (min(max(split, 0.0), 1.0)))
     train, held = rows[:split], rows[split:]
@@ -291,6 +291,6 @@ def run(
             )
     return {
         'byte_scores': byte_scores,
-        'feature_convention': model.blocks[-1].feature_source,
-        'epochs': epoch_scores,
+        'feature_source': model.blocks[-1].feature_source,
+        'epoch_scores': epoch_scores,
     }

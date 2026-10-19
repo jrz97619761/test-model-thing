@@ -124,7 +124,7 @@ Evaluation and samples restore state after success or error.
 
 `features(x)` returns one `[dim]` vector for CoLA. The `feature_source` property reports `final-output` when the block uses `x`.
 RTU uses its recurrent state and reports `recurrent-state`.
-The CoLA result keeps the JSON key `feature_convention` for compatibility.
+The CoLA result uses the JSON key `feature_source`.
 
 Resolved model config and checkpoint metadata both contain `block`.
 The checkpoint loader requires every current config field and the `block` selector.
@@ -434,7 +434,8 @@ The loader ignores blank lines and preserves sentence whitespace. TSV row number
 The split is contiguous. Values below 0 or above 1 are clipped to that range. The model weights stay frozen, and only a separate linear classification head receives updates. The command reports train and held-out confusion counts with MCC multiplied by 100. The score range is -100 to 100.
 
 RTU uses recurrent-state features. Other blocks use final-output features by default.
-The benchmark reports the JSON key `feature_convention` as `recurrent-state` or `final-output` with the CoLA scores.
+The benchmark reports the JSON key `feature_source` as `recurrent-state` or `final-output` with the CoLA scores.
+The `epoch_scores` key contains the CoLA scores for each epoch. Without CoLA, this list is empty.
 
 The benchmark prints results to the terminal. It does not save a report or checkpoint. A missing supplied TSV raises an ordinary file error.
 

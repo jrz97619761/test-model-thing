@@ -39,7 +39,7 @@ From the checkout, create a virtual environment and install the CLI:
 
 ```bash
 # Use python3.12, python3.13, or python3.14.
-python3.12 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
 tmt --version
