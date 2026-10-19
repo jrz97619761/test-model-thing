@@ -4,8 +4,6 @@
 
 TMT is an experimental MLX byte-level language model with recurrent state, recurrent trace units, and latent-space prediction. Treat quality claims as experiment results. Small fixtures check behavior, not model quality.
 
-Follow more specific `AGENTS.md` files in subdirectories.
-
 Before a change, inspect the relevant source, tests, docs, and `git status --short`. Trace inputs, model state, outputs, and failure paths. Preserve user changes. Keep edits small and follow local style. Preserve JSON key order in examples.
 
 Read directly relevant skills before use. Use primary sources for current technical claims and Context7 for current library docs when available. Report unavailable tools and checks you did not run.
@@ -14,7 +12,8 @@ Read directly relevant skills before use. Use primary sources for current techni
 
 | Path | Purpose |
 | --- | --- |
-| `src/tmt/main.py` | Model arithmetic, RTU traces, loss, optimizer updates, and sample generation |
+| `src/tmt/model.py` | Model arithmetic, RTU traces, loss, optimizer updates, and sample generation |
+| `src/tmt/main.py` | Compatibility imports for the model classes |
 | `src/tmt/config.py` | Model defaults and partial JSON configuration |
 | `src/tmt/cli.py` | CLI parser, help, validation, and command dispatch |
 | `src/tmt/checkpoint.py` | Model creation and strict checkpoint I/O |
