@@ -194,7 +194,7 @@ tmt train [CHECKPOINT] --data GLOB --seed N [--config PATH | --resume] [--run NA
 - `--eval-data GLOB` selects held-out raw-byte files for interval evaluation. Quote the glob.
 - `--eval-every N` sets the evaluation interval in updates. Use a positive value. Set this option with `--eval-data`.
 - `--eval-max-bytes N` sets the global input-byte budget for each evaluation. The default is `8192` bytes. Use a positive value.
-- Get MLX, a valid model config, and at least one file that matches `GLOB` for a fresh run.
+- Get MLX, a valid model config, and at least one file that matches `GLOB` for a fresh run. At least one selected file must contain two or more bytes. The command finds this only in the first data pass, after it creates the run folder.
 
 ### Workflow
 
@@ -211,7 +211,7 @@ tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 
 ### Behavior and files
 The CLI sorts matched paths and shuffles them once from `--seed`. It repeats that order until it reaches `--updates`. Each adjacent byte pair gives one target-byte update. The model resets block state and temporal traces at each file boundary. A file with fewer than two bytes gives no update. It consumes the terminal byte without an update.
 
-A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder. The command checks train and evaluation selections before folder creation. The evaluation selection must contain at least one document with two or more bytes. Unmatched globs and unreadable files cause an input error. After an input error, correct the input and retry with the same run name. A failure after the run starts leaves the run folder with its manifest, so a retry needs a new run name.
+A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder. The command checks train and evaluation selections before folder creation. The evaluation selection must contain at least one document with two or more bytes. Unmatched globs and unreadable files cause an input error. After an input error, correct the input and retry with the same run name. A failure after the run starts leaves the run folder with its manifest, so a retry needs a new run name. A train selection without a file of two or more bytes is such a failure. The run fails in its first data pass with status `failed`.
 
 A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp run stores it at `runs/<TIMESTAMP>/manifest/run.json`. An explicit checkpoint stores it at `manifest/run.json` under its parent folder.
 
@@ -509,7 +509,7 @@ tmt inspect runs/first/model.safetensors
 ### Behavior and files
 The command loads the checkpoint and prints three lines. The first line shows the checkpoint path, `step`, the total optimizer step, and the count of trainable tensor elements. The second line shows the model config as JSON. The third line shows `status`, `objective`, `seed`, and `completed_updates` (as `updates`) from `manifest/run.json` beside the checkpoint. Without that file, the third line is `run manifest: none`.
 
-The manifest is the record of the latest invocation that used that folder. During an active run, it shows the state at the last checkpoint save. The command does not change the checkpoint or the manifest, and it does not change the caller's RNG state.
+The manifest is the record of the latest invocation that used that folder. During an active run, it shows the state at the last checkpoint save. Before the first save, it shows the state at run start. The command does not change the checkpoint or the manifest, and it does not change the caller's RNG state.
 
 ## help
 

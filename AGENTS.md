@@ -11,7 +11,7 @@ All package paths below are relative to `src/tmt/`.
 | File | Responsibility |
 | --- | --- |
 | `model.py` | `Encoder`, `Decoder`, `Model`, objective loss, optimizer updates, and byte samples |
-| `blocks.py` | `Block`, the RTU `Layer`, block registry, recurrent state, and gradient traces |
+| `blocks.py` | `Block`, the `RTUBlock`, block registry, recurrent state, and gradient traces |
 | `config.py` | `MODEL_DEFAULTS` and partial JSON configuration through `load_config()` |
 | `validation.py` | Input checks, checkpoint metadata and tensor checks, and block contracts |
 | `checkpoint.py` | Seeded model creation and Safetensors save/load |
@@ -52,11 +52,12 @@ python -m pip install -e '.[test]'
 ```
 
 The editable installation supports imports from the `src/` layout and CLI subprocess tests.
-The `test` extra supplies pytest. Use the selected environment for all checks.
+The `test` extra supplies pytest and ruff. `pyproject.toml` contains the ruff rules. Use the selected environment for all checks.
 
 For code changes, run these commands from the repository root:
 
 ```sh
+ruff check src test
 python -m pytest
 python -m tmt --help
 python -m tmt --version
