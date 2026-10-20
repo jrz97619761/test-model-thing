@@ -42,7 +42,7 @@ INVALID_GRIDS = {
 def test_train_visits_byte_pairs_and_resumes(
     monkeypatch, capsys, tiny_settings, tmp_path, snapshot
 ):
-    from tmt.cli import train
+    from tmt.runtime import train
     from tmt.model import Model
 
     data = tmp_path / 'train.bin'
@@ -180,7 +180,7 @@ def test_train_in_worker_thread(tiny_settings, tmp_path):
 
 
 def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
-    from tmt.cli import train
+    from tmt.runtime import train
     from tmt.model import Model
 
     records, calls, paths = [], [], {}
@@ -201,7 +201,7 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
 
     checkpoint = tmp_path.resolve() / 'run' / 'model.safetensors'
     with monkeypatch.context() as patches:
-        patches.setattr('tmt.cli.json.dump', capture)
+        patches.setattr('json.dump', capture)
         patches.setattr(Model, 'train_step', record_train)
         trained = train(tiny_settings, checkpoint, 'data/*.bin', 4, 11, False)
 
@@ -253,7 +253,7 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
 def test_manifest_after_failure(
     monkeypatch, tiny_settings, tmp_path, manifest_fields, jsonl, error, status, resume
 ):
-    from tmt.cli import train
+    from tmt.runtime import train
     from tmt.model import Model
 
     train_step = Model.train_step
@@ -312,7 +312,7 @@ def test_manifest_after_failure(
 
 
 def test_short_documents_fail_the_run(tiny_settings, tmp_path):
-    from tmt.cli import train
+    from tmt.runtime import train
 
     (tmp_path / 'data').mkdir()
     (tmp_path / 'data' / 'empty.bin').write_bytes(b'')
@@ -334,7 +334,7 @@ def test_short_documents_fail_the_run(tiny_settings, tmp_path):
 
 
 def test_checkpoint_every_500_updates(capsys, tiny_settings, tmp_path):
-    from tmt.cli import train
+    from tmt.runtime import train
 
     data = tmp_path / 'train.bin'
     data.write_bytes(b'abcdefghijklmnopqrstuvwxyz')
@@ -343,9 +343,10 @@ def test_checkpoint_every_500_updates(capsys, tiny_settings, tmp_path):
 
     lines = capsys.readouterr().out.splitlines()
     assert [line for line in lines if line.startswith('saved checkpoint:')] == [
-        f'saved checkpoint: {checkpoint}, updates: 500',
-        f'saved checkpoint: {checkpoint}, updates: 501',
+        f'saved checkpoint: {checkpoint}, updates: 500, step: 500',
+        f'saved checkpoint: {checkpoint}, updates: 501, step: 501',
     ]
+    assert lines[-1] == f'updates: 501, step: 501, checkpoint: {checkpoint}'
 
 
 def test_post_update_action_order(monkeypatch, tmp_path):
@@ -414,7 +415,7 @@ def test_loss_rows(
     ce_only,
     ends,
 ):
-    from tmt.cli import train
+    from tmt.runtime import train
     from tmt.model import Model
 
     data = tmp_path / 'train.bin'
@@ -502,8 +503,8 @@ def test_train_command_run_folders(monkeypatch, run_cli, tiny_settings, tmp_path
     )[0] == 1
 
 
-def test_sampling(tiny_settings, tmp_path, snapshot, jsonl):
-    from tmt.cli import train
+def test_sampling(capsys, tiny_settings, tmp_path, snapshot, jsonl):
+    from tmt.runtime import train
 
     data = tmp_path / 'train.bin'
     data.write_bytes(b'abcdefghij')
@@ -535,8 +536,14 @@ def test_sampling(tiny_settings, tmp_path, snapshot, jsonl):
     for row in rows:
         assert len(Path(row['path']).read_bytes()) == row['bytes']
 
+    capsys.readouterr()
     resumed = train(None, checkpoint, str(data), 2, **base, **again)
     assert int(resumed.optimizer.state['step'].item()) == 6
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-2:] == [
+        f'saved checkpoint: {checkpoint}, updates: 2, step: 6',
+        f'updates: 2, step: 6, checkpoint: {checkpoint}',
+    ]
     keys = ('completed_updates', 'optimizer_step')
     assert [{k: row[k] for k in keys} for row in jsonl(samples)] == [
         {'completed_updates': 1, 'optimizer_step': 5},
@@ -546,7 +553,7 @@ def test_sampling(tiny_settings, tmp_path, snapshot, jsonl):
 
 def test_interval_evaluation(tiny_settings, tmp_path, snapshot, jsonl):
     from tmt.benchmark import evaluate
-    from tmt.cli import documents, train
+    from tmt.runtime import documents, train
 
     training = tmp_path / 'training.bin'
     training.write_bytes(b'abcdefghij')
@@ -610,7 +617,7 @@ def test_interval_evaluation(tiny_settings, tmp_path, snapshot, jsonl):
 def test_sweep_rejects_invalid_grid(
     monkeypatch, forbid_call, tiny_settings, tmp_path, grid, message, existing
 ):
-    from tmt.cli import sweep
+    from tmt.runtime import sweep
 
     monkeypatch.setattr('tmt.runtime.train', forbid_call)
     (tmp_path / 'model.json').write_text(json.dumps(tiny_settings))
@@ -637,7 +644,7 @@ def test_sweep_rejects_invalid_grid(
 def test_sweep_failure_records_status(
     monkeypatch, tiny_settings, error_type, status, tmp_path
 ):
-    from tmt.cli import sweep
+    from tmt.runtime import sweep
 
     grid, config, data = tmp_path / 'grid.json', tmp_path / 'model.json', tmp_path / 'd'
     config.write_text(json.dumps(tiny_settings))
@@ -707,7 +714,8 @@ def test_sweep_runs_grid(
     monkeypatch, capsys, tiny_settings, tmp_path, manifest_fields, jsonl
 ):
     from tmt.blocks import BLOCKS
-    from tmt.cli import load_model, sweep
+    from tmt.checkpoint import load_model
+    from tmt.runtime import sweep
 
     grid, config = tmp_path / 'grid.json', tmp_path / 'model.json'
     grid.write_text(json.dumps({'block': ['rtu', 'rtu-test'], 'seed': [11, 22]}))

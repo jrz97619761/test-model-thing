@@ -81,6 +81,7 @@ The tests are in `test/`:
 | `test_train.py` | Train updates, resume, manifests, samples, evaluation intervals, and sweeps |
 
 `test/conftest.py` supplies shared fixtures.
+Tests import helpers from the module that defines them. `tmt.cli` exports CLI entry points only.
 `test/fixtures/rtu-baseline.json` records seeded numerical results.
 Do not regenerate the baseline only to hide a regression. Review any intentional baseline change.
 
@@ -128,6 +129,9 @@ On the main thread, its SIGINT handler records an interrupt request.
 The trainer checks the request at complete update boundaries, after the update actions.
 It saves before it raises `KeyboardInterrupt` for that request.
 Worker threads do not install that handler.
+`cli.console_main()` is the entry point for the console script and `python -m tmt`.
+It prints `tmt: interrupted` and lets the `KeyboardInterrupt` end the process through SIGINT.
+`cli.main()` raises `KeyboardInterrupt` to its caller.
 
 - Preserve update boundaries and action order when the train loop changes.
 - Resolve relative CLI paths from the current directory.
@@ -139,6 +143,7 @@ Worker threads do not install that handler.
 ## Documentation and handoff
 
 - Update `src/tmt/commands.md` when command behavior changes.
+- A new command needs one `COMMANDS` entry in `cli.py` and one `## name` section in `src/tmt/commands.md`. `test_every_command_has_handler_and_manual_section` checks both.
 - Keep the manual in package data. Verify affected examples against the implementation.
 - Preserve intentional JSON field order in examples and manifest builders.
 - Use concise technical English. Apply the installed `simplified-technical-english` skill when available.

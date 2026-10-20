@@ -1,3 +1,4 @@
+import argparse
 import json
 import shlex
 from importlib.resources import files
@@ -86,6 +87,116 @@ SEED_ARGV = {  # even cases get seed -1, odd cases get 2**64
 @pytest.fixture
 def manual():
     return files('tmt').joinpath('commands.md').read_text(encoding='utf-8')
+
+
+@pytest.mark.parametrize(
+    ('argv', 'expected'),
+    [
+        (
+            'train --data train.bin --seed 11',
+            {
+                'command': 'train',
+                'config': None,
+                'log_every': 100,
+                'checkpoint': None,
+                'resume': False,
+            },
+        ),
+        (
+            'sweep --data train.bin --seed 11 --grid grid.json '
+            '--development dev.bin --output sweep',
+            {
+                'command': 'sweep',
+                'config': 'model.json',
+                'log_every': 100,
+                'max_bytes': 8192,
+            },
+        ),
+        (
+            'generate model.safetensors --prompt X --output sample.bin --seed 11',
+            {
+                'command': 'generate',
+                'log_every': 1000,
+                'bytes': 512,
+                'temperature': None,
+            },
+        ),
+        (
+            'evaluate model.safetensors --data dev.bin',
+            {'command': 'evaluate', 'max_bytes': 8192, 'windows': (), 'output': None},
+        ),
+        (
+            'benchmark model.safetensors --seed 11',
+            {'command': 'benchmark', 'epochs': 1, 'split': 0.5, 'cola_data': None},
+        ),
+        ('init', {'command': 'init', 'output': None}),
+    ],
+    ids=['train', 'sweep', 'generate', 'evaluate', 'benchmark', 'init'],
+)
+def test_parser_command_defaults(argv, expected):
+    from tmt.cli import build_parser
+
+    args = vars(build_parser().parse_args(shlex.split(argv)))
+    assert {name: args[name] for name in expected} == expected
+
+
+@pytest.mark.parametrize(
+    'argv',
+    [
+        ['train'],
+        ['sweep', '--grid', 'grid.json', '--development', 'dev/*', '--output', 'sweep'],
+    ],
+    ids=['train', 'sweep'],
+)
+def test_shared_training_arguments(argv):
+    from tmt.cli import build_parser
+
+    options = (
+        "--data 'train/*' --updates 3 --log-every 2 --seed 22 --ce-only "
+        '--sample-every 1 --sample-prompt X --sample-seed 33 --sample-bytes 4 '
+        "--eval-data 'dev/*' --eval-every 2 --eval-max-bytes 8"
+    )
+    args = vars(build_parser().parse_args([*argv, *shlex.split(options)]))
+    expected = {
+        'data': 'train/*',
+        'updates': 3,
+        'log_every': 2,
+        'seed': 22,
+        'ce_only': True,
+        'sample_every': 1,
+        'sample_prompt': 'X',
+        'sample_seed': 33,
+        'sample_bytes': 4,
+        'eval_data': 'dev/*',
+        'eval_every': 2,
+        'eval_max_bytes': 8,
+    }
+    assert {name: args[name] for name in expected} == expected
+
+
+def test_every_command_has_handler_and_manual_section(manual):
+    from tmt.cli import COMMANDS, HELP_TOPICS, build_parser
+
+    parser = build_parser()
+    subparsers = next(
+        action for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    assert tuple(subparsers.choices) == HELP_TOPICS
+    assert set(HELP_TOPICS) == set(TOPICS)
+    for command in COMMANDS:
+        subparser = subparsers.choices[command.name]
+        assert subparser.get_default('handler') is command.handler
+        assert f'\n## {command.name}\n' in manual
+
+
+def test_evaluate_windows_default_is_not_shared():
+    from tmt.cli import build_parser
+
+    argv = ['evaluate', 'model.safetensors', '--data', 'dev.bin']
+    first = build_parser().parse_args(argv).windows
+    assert isinstance(first, tuple)
+    assert build_parser().parse_args(argv).windows == ()
 
 
 @pytest.mark.parametrize(
@@ -241,6 +352,84 @@ def test_manual_topics(run_cli, manual):
     assert '## init' not in stdout
 
 
+@pytest.mark.parametrize(
+    ('argv', 'expected'),
+    [
+        ([], (False, None)),
+        (['help'], (True, None)),
+        (['help', 'train'], (True, 'train')),
+        (['help', '--help'], (True, 'help')),
+        (['-h'], (False, None)),
+        (['--help', 'train'], (True, 'train')),
+        (['--help', '--version'], (False, None)),
+        (['train', '--help'], (True, 'train')),
+        (['nonexistent', '-h'], (True, 'nonexistent')),
+        (['--version', '--help'], (False, None)),
+        (['--seed', '1', '--help'], (False, None)),
+        (['train', '--data', 'x'], (False, None)),
+    ],
+)
+def test_manual_topic(argv, expected):
+    from tmt.cli import _manual_topic
+
+    assert _manual_topic(argv) == expected
+
+
+@pytest.mark.parametrize(
+    ('argv', 'code', 'stdout_start'),
+    [
+        ('--version --help', 0, 'tmt '),
+        ('--help --version', 0, 'usage: tmt'),
+        ('--seed 1 --help', 2, ''),
+    ],
+    ids=['version-first', 'help-first', 'unknown-option-first'],
+)
+def test_option_first_help_uses_parser(
+    model_free_cli, tmp_path, argv, code, stdout_start
+):
+    result = model_free_cli(*argv.split())
+    assert result.returncode == code, result.stderr
+    assert result.stdout.startswith(stdout_start)
+    assert 'unknown help topic' not in result.stderr
+    assert 'Traceback' not in result.stderr
+    if code:
+        assert 'tmt: error:' in result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ('argv', 'commands'),
+    [
+        ('--seed 1 --help', 'train, benchmark, generate, sweep'),
+        ('--seed 1 train --data train.bin', 'train, benchmark, generate, sweep'),
+        ('--data=train.bin train', 'train, evaluate, sweep'),
+        ('--resume train model.safetensors', 'train'),
+        ('--windows 2 evaluate model.safetensors', 'evaluate'),
+    ],
+    ids=['before-help', 'before-command', 'equals-form', 'flag', 'evaluate-only'],
+)
+def test_command_option_before_command(run_cli, tmp_path, argv, commands):
+    code, stdout, stderr = run_cli(*shlex.split(argv))
+    assert (code, stdout) == (2, '')
+    name = shlex.split(argv)[0].split('=')[0]
+    assert (
+        f'{name} must come after the command name; commands that accept it: {commands}'
+        in stderr
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ('argv', 'code'),
+    [('--vers', 0), ('--bogus train', 2), ('-- train', 2)],
+    ids=['top-level-abbreviation', 'unknown-option', 'separator'],
+)
+def test_other_leading_options_use_parser(run_cli, argv, code):
+    result = run_cli(*argv.split())
+    assert result[0] == code
+    assert 'must come after the command name' not in result[2]
+
+
 @pytest.mark.parametrize('case', HELP_ERRORS)
 def test_help_errors(run_cli, tmp_path, case):
     argv, message = HELP_ERRORS[case]
@@ -272,11 +461,22 @@ def test_seed_checked_first(run_cli, tmp_path, case):
     assert list(tmp_path.iterdir()) == [output]
 
 
+def test_training_validation_order(run_cli, tmp_path):
+    code, stdout, stderr = run_cli(
+        'train', '--data', 'missing/*', '--seed', '11',
+        '--log-every', '0', '--sample-bytes', '0',
+    )
+    assert (code, stdout) == (1, '')
+    assert 'log-every must be positive' in stderr
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize('operation', OPERATIONS)
 def test_direct_seed_validation(monkeypatch, forbid_call, operation):
     from tmt import runtime, validation
     from tmt.benchmark import run
-    from tmt.cli import generate, load_model, new_model, sweep, train
+    from tmt.checkpoint import load_model, new_model
+    from tmt.runtime import generate, sweep, train
 
     monkeypatch.setattr(validation, 'model_settings', forbid_call)
     monkeypatch.setattr(validation, 'checkpoint_header', forbid_call)
@@ -319,7 +519,7 @@ def test_direct_seed_validation(monkeypatch, forbid_call, operation):
 )
 def test_direct_primary_seed_is_required(operation, error, message):
     from tmt.benchmark import run
-    from tmt.cli import generate, sweep, train
+    from tmt.runtime import generate, sweep, train
 
     calls = {
         'train': lambda: train({}, 'unused/model.safetensors', 'missing/*'),
@@ -388,7 +588,7 @@ def test_input_errors_leave_no_output(workspace, run_cli, case):
 
 @pytest.mark.parametrize('limit,expected', [(6, [b'abcd', b'ef']), (1, [b'a'])])
 def test_documents_budget(tmp_path, limit, expected):
-    from tmt.cli import documents
+    from tmt.runtime import documents
 
     (tmp_path / 'a.bin').write_bytes(b'abcd')
     (tmp_path / 'b.bin').write_bytes(b'efgh')
@@ -431,7 +631,7 @@ def test_byte_files_documents_keep_empty_files_and_share_budget(tmp_path):
 
 
 def test_generate(checkpoint, tmp_path, capsys):
-    from tmt.cli import generate
+    from tmt.runtime import generate
 
     path, original = checkpoint.path, checkpoint.path.read_bytes()
     first_path, second_path = tmp_path / 'first.bin', tmp_path / 'second.bin'
@@ -456,7 +656,7 @@ def test_generate(checkpoint, tmp_path, capsys):
 
 
 def test_generate_temperature_floor(checkpoint, tmp_path):
-    from tmt.cli import generate
+    from tmt.runtime import generate
 
     path, output = checkpoint.path, tmp_path / 'sample.bin'
     minimum = generate(path, 'The ', output, seed=11, count=2, temperature=0.1)
@@ -482,7 +682,16 @@ def test_evaluate_command(workspace, checkpoint, run_cli):
     assert 'at least one target' in stderr
 
 
-def test_train_sigint_saves_checkpoint(workspace, snapshot):
+@pytest.mark.parametrize(
+    'launch',
+    [
+        'from tmt.cli import console_main\nconsole_main(ARGV)',
+        "import runpy, sys\nsys.argv = ['tmt', *ARGV]\n"
+        "runpy.run_module('tmt', run_name='__main__', alter_sys=True)",
+    ],
+    ids=['console-script', 'python-m'],
+)
+def test_train_sigint_saves_checkpoint(workspace, snapshot, launch):
     import signal
     import subprocess
     import sys
@@ -492,7 +701,6 @@ def test_train_sigint_saves_checkpoint(workspace, snapshot):
     script = """
 import os
 import signal
-from tmt.cli import main
 from tmt.model import Model
 
 update = Model.updategrads
@@ -500,14 +708,16 @@ def interrupt(model, grads):
     os.kill(os.getpid(), signal.SIGINT)
     return update(model, grads)
 Model.updategrads = interrupt
-main(['train', '--data', 'train.bin', '--run', 'interrupted',
-      '--seed', '11', '--updates', '3'])
-"""
+ARGV = ['train', '--data', 'train.bin', '--run', 'interrupted',
+        '--seed', '11', '--updates', '3']
+""" + launch
     result = subprocess.run(
         [sys.executable, '-c', script], cwd=workspace,
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == -signal.SIGINT, result.stderr
+    assert 'Traceback' not in result.stderr
+    assert result.stderr.splitlines()[-1] == 'tmt: interrupted'
     checkpoint = workspace / 'runs/interrupted/model.safetensors'
     assert 'saved checkpoint:' in result.stdout
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
@@ -520,8 +730,45 @@ main(['train', '--data', 'train.bin', '--run', 'interrupted',
     assert snapshot(loaded) == snapshot(expected)
 
 
+def raise_interrupt(*args, **kwargs):
+    raise KeyboardInterrupt
+
+
+def test_console_main_reports_interrupt_once(monkeypatch, capsys):
+    import sys
+    from tmt import cli
+
+    previous = []
+    monkeypatch.setattr(sys, 'excepthook', lambda kind, *rest: previous.append(kind))
+    monkeypatch.setattr(cli, 'main', raise_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        cli.console_main(['train'])
+    sys.excepthook(KeyboardInterrupt, KeyboardInterrupt(), None)
+    sys.excepthook(ValueError, ValueError('other'), None)
+    assert capsys.readouterr().err == 'tmt: interrupted\n'
+    assert previous == [ValueError]
+
+
+def test_main_leaves_interrupt_to_caller(monkeypatch):
+    import sys
+    from tmt import cli
+
+    hook = sys.excepthook
+    monkeypatch.setattr(cli, 'evaluate_checkpoint', raise_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(['evaluate', 'model.safetensors', '--data', 'dev.bin'])
+    assert sys.excepthook is hook
+
+
+def test_console_script_uses_console_main():
+    from importlib.metadata import entry_points
+
+    (script,) = entry_points(group='console_scripts', name='tmt')
+    assert script.value == 'tmt.cli:console_main'
+
+
 def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
-    from tmt.cli import load_model
+    from tmt.checkpoint import load_model
 
     root = tmp_path
     assert '## init' in cli('help', 'init').stdout

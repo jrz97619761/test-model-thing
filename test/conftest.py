@@ -7,7 +7,7 @@ import pytest
 
 @pytest.fixture
 def tiny_settings():
-    from tmt.cli import load_config
+    from tmt.config import load_config
 
     settings = load_config()
     settings.update(dim=4, layers=1, spread=4)
@@ -16,7 +16,7 @@ def tiny_settings():
 
 @pytest.fixture
 def model_factory(tiny_settings):
-    from tmt.cli import new_model
+    from tmt.checkpoint import new_model
 
     def create(seed=11, **overrides):
         return new_model({**tiny_settings, **overrides}, seed)
@@ -36,7 +36,7 @@ def forbid_call():
 def checkpoint(tmp_path, tiny_settings):
     """Save an untrained tiny checkpoint and return its parts."""
     import mlx.core as mx
-    from tmt.cli import new_model, save_checkpoint
+    from tmt.checkpoint import new_model, save_checkpoint
 
     path = tmp_path / 'model.safetensors'
     model = new_model(tiny_settings, 11)

@@ -4,28 +4,16 @@ import argparse
 import glob
 import json
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from os import PathLike
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, NamedTuple, Protocol, Sequence
 
 from . import validation
-from .checkpoint import (
-    load_checkpoint,
-    load_model,
-    new_model,
-    save_checkpoint,
-)
 from .config import load_config
 from .records import build_run_manifest, write_json
-from .runtime import (
-    _training_sample,
-    documents,
-    evaluate_checkpoint,
-    generate,
-    sweep,
-    train,
-)
+from .runtime import evaluate_checkpoint, generate, sweep, train
 
 
 def evaluate_command(args: argparse.Namespace) -> None:
@@ -107,15 +95,7 @@ def command_manual(topic: str | None = None) -> str:
     manual = files('tmt').joinpath('commands.md').read_text(encoding='utf-8')
     if topic is None:
         return manual
-    if topic not in (
-        'init',
-        'train',
-        'sweep',
-        'evaluate',
-        'benchmark',
-        'generate',
-        'help',
-    ):
+    if topic not in HELP_TOPICS:
         raise ValueError(f'unknown help topic: {topic}')
     heading = f'## {topic}\n'
     section = manual.split(heading, 1)[1].split('\n## ', 1)[0]
@@ -124,7 +104,14 @@ def command_manual(topic: str | None = None) -> str:
 
 type ArgumentSpec = tuple[tuple[str, ...], dict[str, Any]]
 
-TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+INIT_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (
+        ('--output',),
+        {'help': 'write only model JSON to PATH; default: initialize current folder'},
+    ),
+)
+
+SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     (
         ('--data',),
         {
@@ -207,7 +194,43 @@ TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     ),
 )
 
-EVALUATION_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+TRAIN_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (
+        ('checkpoint',),
+        {
+            'nargs': '?',
+            'help': 'explicit checkpoint path; required with --resume',
+        },
+    ),
+    (
+        ('--run',),
+        {
+            'help': 'one relative folder name under runs/; '
+            'default: UTC timestamp with microseconds; excludes checkpoint and --resume',
+        },
+    ),
+)
+
+TRAIN_SETTINGS_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (
+        ('--config',),
+        {
+            'help': 'fresh model JSON, default: model.json in current folder; '
+            'excludes --resume',
+        },
+    ),
+    (
+        ('--resume',),
+        {
+            'action': 'store_true',
+            'help': 'load checkpoint settings and add --updates with a new data pass; '
+            'no exact cursor/RNG resume',
+        },
+    ),
+)
+
+EVALUATE_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (('checkpoint',), {'help': 'strict model and optimizer checkpoint'}),
     (
         ('--data',),
         {'required': True, 'help': 'quoted raw-file glob, one document per file'},
@@ -225,7 +248,7 @@ EVALUATION_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'nargs': '+',
-            'default': [],
+            'default': (),
             'help': 'context lengths in input bytes; default: no windows',
         },
     ),
@@ -235,190 +258,166 @@ EVALUATION_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     ),
 )
 
+BENCHMARK_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (('checkpoint',), {'help': 'strict checkpoint; fixed byte suite always runs'}),
+    (
+        ('--epochs',),
+        {
+            'type': int,
+            'default': 1,
+            'help': 'positive CoLA classifier epochs, default: 1',
+        },
+    ),
+    (
+        ('--split',),
+        {
+            'type': float,
+            'default': 0.5,
+            'help': 'contiguous CoLA train fraction, default: 0.5',
+        },
+    ),
+    (
+        ('--cola-data',),
+        {'help': 'optional four-column CoLA TSV; default: byte suite only'},
+    ),
+    (('--seed',), {'type': int, 'required': True, 'help': 'CoLA head seed'}),
+)
+
+GENERATE_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (('checkpoint',), {'help': 'strict checkpoint for frozen generation'}),
+    (
+        ('--prompt',),
+        {'required': True, 'help': 'nonempty text encoded as UTF-8'},
+    ),
+    (
+        ('--output',),
+        {'required': True, 'help': 'raw-byte output file without the prompt'},
+    ),
+    (('--seed',), {'type': int, 'required': True, 'help': 'sample seed'}),
+    (
+        ('--bytes',),
+        {
+            'type': int,
+            'default': 512,
+            'help': 'number of output bytes, default: 512',
+        },
+    ),
+    (
+        ('--log-every',),
+        {
+            'type': int,
+            'default': 1000,
+            'help': 'positive progress interval in output bytes, default: 1000',
+        },
+    ),
+    (
+        ('--temperature',),
+        {
+            'type': float,
+            'help': 'finite nonnegative sampler temperature; effective minimum: 0.1; '
+            'default: checkpoint value',
+        },
+    ),
+)
+
+SWEEP_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (
+        ('--grid',),
+        {
+            'required': True,
+            'help': 'JSON object with nonempty arrays of model values or seed',
+        },
+    ),
+    (
+        ('--development',),
+        {'required': True, 'help': 'quoted raw-file development glob'},
+    ),
+    (
+        ('--output',),
+        {'required': True, 'help': 'sweep folder for run-NNNN and results.jsonl'},
+    ),
+    (
+        ('--config',),
+        {
+            'default': 'model.json',
+            'help': 'base model JSON, default: model.json in current folder',
+        },
+    ),
+    (
+        ('--max-bytes',),
+        {
+            'type': int,
+            'default': 8192,
+            'help': 'positive global development input-byte prefix, default: 8192',
+        },
+    ),
+)
+
+MONITORING_OPTIONS = (
+    'sample_every',
+    'sample_prompt',
+    'sample_bytes',
+    'eval_data',
+    'eval_every',
+    'eval_max_bytes',
+)
+
+
+class _ArgumentTarget(Protocol):
+    def add_argument(self, *names: str, **options: Any) -> argparse.Action: ...
+
 
 def _register_arguments(
-    parser: argparse.ArgumentParser, specifications: Sequence[ArgumentSpec]
+    parser: _ArgumentTarget, specifications: Sequence[ArgumentSpec]
 ) -> None:
     for names, options in specifications:
         parser.add_argument(*names, **options)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    training_options = argparse.ArgumentParser(add_help=False)
-    _register_arguments(training_options, TRAINING_ARGUMENTS)
+HELP_FLAGS = ('-h', '--help')
 
-    parser = argparse.ArgumentParser(
-        prog='tmt',
-        description='TMT experiment commands',
-        epilog='Use tmt help for the complete command manual.',
-    )
-    parser.add_argument('--version', action='version', version=version_text())
-    commands = parser.add_subparsers(dest='command', required=True)
-    init = commands.add_parser('init', help='write default model settings')
-    init.add_argument(
-        '--output',
-        help='write only model JSON to PATH; default: initialize current folder',
-    )
-    training = commands.add_parser(
-        'train', parents=[training_options], help='train a model on byte files'
-    )
-    training.add_argument(
-        'checkpoint', nargs='?', help='explicit checkpoint path; required with --resume'
-    )
-    training.add_argument(
-        '--run',
-        help='one relative folder name under runs/; '
-        'default: UTC timestamp with microseconds; excludes checkpoint and --resume',
-    )
-    settings = training.add_mutually_exclusive_group()
-    settings.add_argument(
-        '--config',
-        help='fresh model JSON, default: model.json in current folder; '
-        'excludes --resume',
-    )
-    settings.add_argument(
-        '--resume',
-        action='store_true',
-        help='load checkpoint settings and add --updates with a new data pass; '
-        'no exact cursor/RNG resume',
-    )
-    evaluation = commands.add_parser('evaluate', help='score next-byte predictions')
-    evaluation.add_argument('checkpoint', help='strict model and optimizer checkpoint')
-    _register_arguments(evaluation, EVALUATION_ARGUMENTS)
-    benchmark = commands.add_parser('benchmark', help='run byte and CoLA benchmarks')
-    benchmark.add_argument(
-        'checkpoint', help='strict checkpoint; fixed byte suite always runs'
-    )
-    benchmark.add_argument(
-        '--epochs',
-        type=int,
-        default=1,
-        help='positive CoLA classifier epochs, default: 1',
-    )
-    benchmark.add_argument(
-        '--split',
-        type=float,
-        default=0.5,
-        help='contiguous CoLA train fraction, default: 0.5',
-    )
-    benchmark.add_argument(
-        '--cola-data', help='optional four-column CoLA TSV; default: byte suite only'
-    )
-    benchmark.add_argument(
-        '--seed', type=int, required=True, help='CoLA head seed'
-    )
-    generation = commands.add_parser(
-        'generate', help='generate a fixed number of bytes'
-    )
-    generation.add_argument(
-        'checkpoint', help='strict checkpoint for frozen generation'
-    )
-    generation.add_argument(
-        '--prompt', required=True, help='nonempty text encoded as UTF-8'
-    )
-    generation.add_argument(
-        '--output', required=True, help='raw-byte output file without the prompt'
-    )
-    generation.add_argument(
-        '--seed', type=int, required=True, help='sample seed'
-    )
-    generation.add_argument(
-        '--bytes', type=int, default=512, help='number of output bytes, default: 512'
-    )
-    generation.add_argument(
-        '--log-every',
-        type=int,
-        default=1000,
-        help='positive progress interval in output bytes, default: 1000',
-    )
-    generation.add_argument(
-        '--temperature',
-        type=float,
-        help='finite nonnegative sampler temperature; effective minimum: 0.1; '
-        'default: checkpoint value',
-    )
-    sweeping = commands.add_parser(
-        'sweep', parents=[training_options], help='run a sequential model grid'
-    )
-    sweeping.add_argument(
-        '--grid',
-        required=True,
-        help='JSON object with nonempty arrays of model values or seed',
-    )
-    sweeping.add_argument(
-        '--development', required=True, help='quoted raw-file development glob'
-    )
-    sweeping.add_argument(
-        '--output', required=True, help='sweep folder for run-NNNN and results.jsonl'
-    )
-    sweeping.add_argument(
-        '--config',
-        default='model.json',
-        help='base model JSON, default: model.json in current folder',
-    )
-    sweeping.add_argument(
-        '--max-bytes',
-        type=int,
-        default=8192,
-        help='positive global development input-byte prefix, default: 8192',
-    )
-    commands.add_parser('help', help='read the bundled command manual or one topic')
-    return parser
+
+def _manual_topic(argv: Sequence[str]) -> tuple[bool, str | None]:
+    if not argv:
+        return False, None
+    first, rest = argv[0], argv[1:]
+    if first == 'help':
+        if any(flag in rest for flag in HELP_FLAGS):
+            return True, 'help'
+        return True, rest[0] if rest else None
+    if first in HELP_FLAGS:
+        if rest and not rest[0].startswith('-'):
+            return True, rest[0]
+        return False, None
+    if not first.startswith('-') and any(flag in rest for flag in HELP_FLAGS):
+        return True, first
+    return False, None
 
 
 def _route_manual_request(argv: Sequence[str], parser: argparse.ArgumentParser) -> bool:
-    help_flags = ('-h', '--help')
-    if argv and (
-        argv[0] == 'help'
-        or (len(argv) > 1 and any(flag in argv for flag in help_flags))
+    if argv[:1] == ['help'] and len(argv) > 2 and not any(
+        flag in argv for flag in HELP_FLAGS
     ):
-        if argv[0] == 'help':
-            if any(flag in argv for flag in help_flags):
-                topic = 'help'
-            else:
-                if len(argv) > 2:
-                    parser.error('help accepts at most one topic')
-                topic = argv[1] if len(argv) == 2 else None
-        else:
-            topic = argv[1] if argv[0] in help_flags else argv[0]
-        try:
-            print(command_manual(topic), end='')
-        except ValueError as error:
-            parser.error(str(error))
-        return True
-    return False
+        parser.error('help accepts at most one topic')
+    requested, topic = _manual_topic(argv)
+    if not requested:
+        return False
+    try:
+        print(command_manual(topic), end='')
+    except ValueError as error:
+        parser.error(str(error))
+    return True
 
 
-def _validate_namespace(args: argparse.Namespace) -> dict[str, Any]:
-    if hasattr(args, 'seed'):
-        validation.seed(args.seed)
-    if args.command in ('train', 'sweep'):
-        validation.seed(args.sample_seed, 'sample-seed')
-        validation.positive(args.updates, 'updates')
-        monitoring = {
-            name: getattr(args, name)
-            for name in (
-                'sample_every',
-                'sample_prompt',
-                'sample_seed',
-                'sample_bytes',
-                'eval_data',
-                'eval_every',
-                'eval_max_bytes',
-            )
-        }
-        validation.monitoring(
-            **{
-                name: value
-                for name, value in monitoring.items()
-                if name != 'sample_seed'
-            }
-        )
-    if args.command in ('train', 'sweep', 'generate'):
-        validation.positive(args.log_every, 'log-every')
-    if args.command in ('train', 'sweep'):
-        return monitoring
-    return {}
+def _monitoring_options(args: argparse.Namespace) -> dict[str, Any]:
+    return {name: getattr(args, name) for name in MONITORING_OPTIONS}
+
+
+def _validate_training_args(args: argparse.Namespace) -> None:
+    validation.training_options(
+        args.seed, args.sample_seed, args.updates, args.log_every
+    )
+    validation.monitoring(**_monitoring_options(args))
 
 
 def _resolve_train_path(
@@ -448,15 +447,12 @@ def _resolve_train_path(
     return settings, checkpoint, new_run
 
 
-def _dispatch_init(args: argparse.Namespace) -> None:
+def _run_init(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     init_config(args.output)
 
 
-def _dispatch_train(
-    args: argparse.Namespace,
-    parser: argparse.ArgumentParser,
-    monitoring: dict[str, Any],
-) -> None:
+def _run_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    _validate_training_args(args)
     settings, checkpoint, new_run = _resolve_train_path(args, parser)
     train(
         settings,
@@ -468,21 +464,25 @@ def _dispatch_train(
         args.resume,
         args.log_every,
         new_run=new_run,
-        **monitoring,
+        sample_seed=args.sample_seed,
+        **_monitoring_options(args),
     )
 
 
-def _dispatch_evaluate(args: argparse.Namespace) -> None:
+def _run_evaluate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     evaluate_command(args)
 
 
-def _dispatch_benchmark(args: argparse.Namespace) -> None:
+def _run_benchmark(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    validation.seed(args.seed)
     from tmt.benchmark import run
 
     run(args.checkpoint, args.epochs, args.split, args.cola_data, seed=args.seed)
 
 
-def _dispatch_generate(args: argparse.Namespace) -> None:
+def _run_generate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    validation.seed(args.seed)
+    validation.positive(args.log_every, 'log-every')
     generate(
         args.checkpoint,
         args.prompt,
@@ -494,7 +494,8 @@ def _dispatch_generate(args: argparse.Namespace) -> None:
     )
 
 
-def _dispatch_sweep(args: argparse.Namespace, monitoring: dict[str, Any]) -> None:
+def _run_sweep(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    _validate_training_args(args)
     sweep(
         args.grid,
         args.data,
@@ -506,27 +507,114 @@ def _dispatch_sweep(args: argparse.Namespace, monitoring: dict[str, Any]) -> Non
         args.ce_only,
         args.max_bytes,
         args.log_every,
-        **monitoring,
+        sample_seed=args.sample_seed,
+        **_monitoring_options(args),
     )
 
 
-def _dispatch_command(
-    args: argparse.Namespace,
-    parser: argparse.ArgumentParser,
-    monitoring: dict[str, Any],
-) -> None:
-    if args.command == 'init':
-        _dispatch_init(args)
-    elif args.command == 'train':
-        _dispatch_train(args, parser, monitoring)
-    elif args.command == 'evaluate':
-        _dispatch_evaluate(args)
-    elif args.command == 'benchmark':
-        _dispatch_benchmark(args)
-    elif args.command == 'generate':
-        _dispatch_generate(args)
-    elif args.command == 'sweep':
-        _dispatch_sweep(args, monitoring)
+def _run_help(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    print(command_manual(), end='')
+
+
+type CommandHandler = Callable[[argparse.Namespace, argparse.ArgumentParser], None]
+
+
+class CommandSpec(NamedTuple):
+    name: str
+    help: str
+    handler: CommandHandler
+    arguments: tuple[ArgumentSpec, ...] = ()
+    shared_training: bool = False
+    exclusive: tuple[ArgumentSpec, ...] = ()
+
+
+COMMANDS: tuple[CommandSpec, ...] = (
+    CommandSpec('init', 'write default model settings', _run_init, INIT_ARGUMENTS),
+    CommandSpec(
+        'train',
+        'train a model on byte files',
+        _run_train,
+        TRAIN_ARGUMENTS,
+        shared_training=True,
+        exclusive=TRAIN_SETTINGS_ARGUMENTS,
+    ),
+    CommandSpec(
+        'evaluate', 'score next-byte predictions', _run_evaluate, EVALUATE_ARGUMENTS
+    ),
+    CommandSpec(
+        'benchmark',
+        'run byte and CoLA benchmarks',
+        _run_benchmark,
+        BENCHMARK_ARGUMENTS,
+    ),
+    CommandSpec(
+        'generate',
+        'generate a fixed number of bytes',
+        _run_generate,
+        GENERATE_ARGUMENTS,
+    ),
+    CommandSpec(
+        'sweep',
+        'run a sequential model grid',
+        _run_sweep,
+        SWEEP_ARGUMENTS,
+        shared_training=True,
+    ),
+    CommandSpec('help', 'read the bundled command manual or one topic', _run_help),
+)
+HELP_TOPICS = tuple(command.name for command in COMMANDS)
+
+
+def _command_options(command: CommandSpec) -> tuple[str, ...]:
+    shared = SHARED_TRAINING_ARGUMENTS if command.shared_training else ()
+    return tuple(
+        name
+        for names, _ in (*shared, *command.arguments, *command.exclusive)
+        for name in names
+        if name.startswith('--')
+    )
+
+
+def _misplaced_option_error(argv: Sequence[str]) -> str | None:
+    """Explain a command option that comes before the command name."""
+    if not argv or not argv[0].startswith('--'):
+        return None
+    name = argv[0].split('=', 1)[0]
+    commands = [
+        command.name for command in COMMANDS if name in _command_options(command)
+    ]
+    if not commands:
+        return None
+    return (
+        f'{name} must come after the command name; '
+        f'commands that accept it: {", ".join(commands)}'
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    training_options = argparse.ArgumentParser(add_help=False)
+    _register_arguments(training_options, SHARED_TRAINING_ARGUMENTS)
+
+    parser = argparse.ArgumentParser(
+        prog='tmt',
+        description='TMT experiment commands',
+        epilog='Use tmt help for the complete command manual.',
+    )
+    parser.add_argument('--version', action='version', version=version_text())
+    commands = parser.add_subparsers(dest='command', required=True)
+    for command in COMMANDS:
+        subparser = commands.add_parser(
+            command.name,
+            parents=[training_options] if command.shared_training else [],
+            help=command.help,
+        )
+        _register_arguments(subparser, command.arguments)
+        if command.exclusive:
+            _register_arguments(
+                subparser.add_mutually_exclusive_group(), command.exclusive
+            )
+        subparser.set_defaults(handler=command.handler)
+    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -535,13 +623,37 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser = build_parser()
         if _route_manual_request(argv, parser):
             return
+        misplaced = _misplaced_option_error(argv)
+        if misplaced is not None:
+            parser.error(misplaced)
         args = parser.parse_args(argv)
-        monitoring = _validate_namespace(args)
-        _dispatch_command(args, parser, monitoring)
+        args.handler(args, parser)
     except (OSError, ValueError) as error:
         print(f'tmt: error: {error}', file=sys.stderr)
         raise SystemExit(1) from None
 
 
+def console_main(argv: Sequence[str] | None = None) -> None:
+    """Run main() as the process entry point.
+
+    Ctrl-C prints one line instead of a traceback. The KeyboardInterrupt still
+    propagates, so Python finalizes and then exits through SIGINT, as shells expect.
+    This is the easiest fix for the traceback issue.
+    """
+    try:
+        main(argv)
+    except KeyboardInterrupt:
+        previous_hook = sys.excepthook
+
+        def report_interrupt(kind, value, traceback) -> None:
+            if issubclass(kind, KeyboardInterrupt):
+                print('tmt: interrupted', file=sys.stderr)
+            else:
+                previous_hook(kind, value, traceback)
+
+        sys.excepthook = report_interrupt
+        raise
+
+
 if __name__ == '__main__':
-    main()
+    console_main()

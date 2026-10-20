@@ -254,7 +254,7 @@ def test_evaluation_restores_state(block, monkeypatch, make_model, snapshot):
 def test_training_sample_restores_state_and_rng(
     block, monkeypatch, make_model, snapshot
 ):
-    from tmt.cli import _training_sample
+    from tmt.runtime import _training_sample
 
     def next_random(seed):
         mx.random.seed(seed)
@@ -317,7 +317,7 @@ def test_training_sample_restores_state_and_rng(
 )
 def test_checkpoint_round_trip(block, convention, tmp_path, tiny_settings, snapshot):
     from tmt.benchmark import rollout
-    from tmt.cli import load_model, save_checkpoint
+    from tmt.checkpoint import load_model, save_checkpoint
 
     settings = {**tiny_settings, 'layers': 2, 'block': block}
     model = Model(**settings)

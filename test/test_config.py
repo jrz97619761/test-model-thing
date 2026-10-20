@@ -98,7 +98,7 @@ def test_load_config(tmp_path, monkeypatch):
     import inspect
 
     from tmt import config
-    from tmt.cli import load_config
+    from tmt.config import load_config
     from tmt.model import Model
 
     defaults = load_config()
@@ -139,7 +139,8 @@ def test_load_config(tmp_path, monkeypatch):
     ('name', 'value'), CONFIG_CASES.values(), ids=list(CONFIG_CASES)
 )
 def test_invalid_config_values(tmp_path, tiny_settings, name, value):
-    from tmt.cli import load_config, new_model
+    from tmt.checkpoint import new_model
+    from tmt.config import load_config
 
     path = tmp_path / 'model.json'
     path.write_text(json.dumps({name: value}))
@@ -173,7 +174,7 @@ def test_validation_error_order(tiny_settings, monkeypatch, changes, message):
 )
 def test_extension_fields(monkeypatch, tmp_path, default, value, message):
     from tmt import config
-    from tmt.cli import load_config
+    from tmt.config import load_config
 
     monkeypatch.setitem(config.MODEL_DEFAULTS, 'extra', default)
     settings = load_config()
@@ -199,7 +200,7 @@ def test_extension_fields(monkeypatch, tmp_path, default, value, message):
     ids=['invalid-json', 'not-object', 'unknown-field'],
 )
 def test_load_config_rejects_bad_files(tmp_path, contents, error, message):
-    from tmt.cli import load_config
+    from tmt.config import load_config
 
     path = tmp_path / 'model.json'
     path.write_text(contents)
@@ -210,7 +211,7 @@ def test_load_config_rejects_bad_files(tmp_path, contents, error, message):
 def test_init_writes_templates(run_cli, tmp_path, manifest_fields):
     import inspect
 
-    from tmt.cli import load_config
+    from tmt.config import load_config
     from tmt.model import Model
 
     repo = Path(__file__).resolve().parents[1]
@@ -282,7 +283,7 @@ def test_init_preserves_files(run_cli, tmp_path, args):
 @pytest.mark.parametrize(('fault', 'parts'), FILE_FAULTS.items(), ids=list(FILE_FAULTS))
 def test_checkpoint_rejects_invalid_files(checkpoint, fault, parts):
     import mlx.core as mx
-    from tmt.cli import load_model
+    from tmt.checkpoint import load_model
 
     path, arrays = checkpoint.path, dict(checkpoint.arrays)
     header, tmt, raw = json.loads(checkpoint.metadata['tmt']), None, None

@@ -256,9 +256,10 @@ The checkpoint contains model and optimizer tensors. The loader checks metadata,
 At fresh-run start, `last_checkpoint` is null. Resume starts with the input checkpoint path and replaces the invocation manifest. Each successful save sets `last_checkpoint` to the absolute path. Resume adds the requested optimizer updates and starts a new data pass. It does not restore a data cursor or random-number state.
 
 The command prints the run folder, seed, config, and successful checkpoint saves.
+Each save line and the final line show `updates`, the completed updates in this invocation, and `step`, the total optimizer step. After a resume, `step` includes the updates before the resume.
 At each progress interval, it prints completed updates, total optimizer step, objective, mean loss, latest loss, and update speed.
 It always prints the final loss.
-It saves every 500 updates and at the end. Ctrl-C requests a stop after the active update and its post-update actions. The trainer saves a checkpoint, records status `interrupted`, and exits with the interrupt. An update failure preserves the last successful checkpoint.
+It saves every 500 updates and at the end. Ctrl-C requests a stop after the active update and its post-update actions. The trainer saves a checkpoint and records status `interrupted`. The CLI then prints `tmt: interrupted` without a traceback and exits through SIGINT. A shell reports exit status `130`. An update failure preserves the last successful checkpoint don't worry.
 
 Checkpoint saves use a temporary file in the checkpoint directory. A successful save atomically replaces the destination and preserves its file permissions. A failed write preserves the previous checkpoint.
 
@@ -356,7 +357,7 @@ Use a new or empty output folder for each sweep. The command rejects a nonempty 
 
 The command checks train, evaluation, and development selections before output creation. An input error leaves no new output folder. Correct the input and retry with the same output path.
 
-After execution starts, `sweep.json` records the settings, grid, data selections, status, current candidate, and completed result count. It also records the error type and message after a failure or interrupt. Completed rows remain in `results.jsonl`. To retry after an execution failure, use a new output path. The command does not resume a partial sweep.
+After execution starts, `sweep.json` records the settings, grid, data selections, status, current candidate, and completed result count. It also records the error type and message after a failure or interrupt. Completed rows remain in `results.jsonl`. Ctrl-C stops the active run as in `train`, then prints `tmt: interrupted` and exits through SIGINT. To retry after an execution failure, use a new output path. The command does not resume a partial sweep.
 
 ## evaluate
 
@@ -515,7 +516,7 @@ tmt --version
 ```
 
 ### Behavior and limits
-`tmt help` prints the complete bundled manual. `tmt help COMMAND` prints one section. `tmt help --help` prints the help section. The `--help` and `-h` forms print the same section. A help request after other command arguments prints the manual before the CLI checks those arguments or starts an experiment.
+`tmt help` prints the complete bundled manual. `tmt help COMMAND` prints one section. `tmt help --help` prints the help section. The `--help` and `-h` forms print the same section. A help request after other command arguments prints the manual before the CLI checks those arguments or starts an experiment. When the first argument is another option, such as `--version`, the parser handles the request in argument order. For example, `tmt --version --help` prints the version, and `tmt --help --version` prints the short command index. These requests do not print a manual section. A command option before the command name, such as `tmt --seed 1 train`, gives a parser error that names the commands that accept that option.
 
 An unknown help topic gives a short parser error and exit code `2`. A manual request does not need a valid file path. The version command reads installed distribution metadata from `test-model-thing`.
 

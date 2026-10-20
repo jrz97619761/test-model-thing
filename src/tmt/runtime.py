@@ -10,7 +10,7 @@ import random
 import signal
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from os import PathLike
@@ -159,9 +159,7 @@ class TrainingRun:
             log_every=self.log_every,
             objective='ce_only' if self.ce_only else 'tmt',
             resume=self.resume,
-            initial_optimizer_step=(
-                int(self.model.optimizer.state['step'].item()) if self.resume else 0
-            ),
+            initial_optimizer_step=self.optimizer_step if self.resume else 0,
             sample=None
             if self.monitor.sample_every is None
             else {
@@ -195,6 +193,11 @@ class TrainingRun:
             / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
         )
 
+    @property
+    def optimizer_step(self) -> int:
+        """Total optimizer updates in the model, including any *before a resume*."""
+        return int(self.model.optimizer.state['step'].item())
+
     def report_loss(self) -> None:
         """Write and print the current objective loss row."""
         if self.record is None or self.last_loss is None:
@@ -204,7 +207,7 @@ class TrainingRun:
         loss = float(self.last_loss.item())
         row = {
             'completed_updates': self.completed,
-            'optimizer_step': int(self.model.optimizer.state['step'].item()),
+            'optimizer_step': self.optimizer_step,
             'objective': self.record['objective'],
             'loss': loss,
             'mean_loss': self.loss_sum / interval_updates,
@@ -237,7 +240,7 @@ class TrainingRun:
             self.monitor.sample_bytes,
             self.monitor.sample_seed,
         )
-        step = int(self.model.optimizer.state['step'].item())
+        step = self.optimizer_step
         self.sample_dir.mkdir(parents=True, exist_ok=True)
         destination = self.sample_dir / f'step-{step:012d}.bin'
         destination.write_bytes(sample)
@@ -267,7 +270,7 @@ class TrainingRun:
             self.manifest_dir / 'evaluation.jsonl',
             {
                 'completed_updates': self.completed,
-                'optimizer_step': int(self.model.optimizer.state['step'].item()),
+                'optimizer_step': self.optimizer_step,
                 **result,
             },
         )
@@ -284,7 +287,10 @@ class TrainingRun:
             raise RuntimeError('training run is not ready to save')
         write_checkpoint(self.checkpoint, self.model, self.settings)
         self.record['last_checkpoint'] = str(self.checkpoint.resolve())
-        print(f'saved checkpoint: {self.checkpoint}, updates: {self.completed}')
+        print(
+            f'saved checkpoint: {self.checkpoint}, updates: {self.completed}, '
+            f'step: {self.optimizer_step}'
+        )
 
     def consume_terminal_byte(self, byte: int) -> None:
         """Advance frozen recurrent state over a document's final byte."""
@@ -408,7 +414,10 @@ class TrainingRun:
                 if previous_handler is not None:
                     signal.signal(signal.SIGINT, previous_handler)
 
-        print(f'updates: {self.completed}, checkpoint: {self.checkpoint}')
+        print(
+            f'updates: {self.completed}, step: {self.optimizer_step}, '
+            f'checkpoint: {self.checkpoint}'
+        )
         return self.model
 
 
@@ -464,7 +473,7 @@ def evaluate_checkpoint(
     checkpoint: str | PathLike[str],
     pattern: str | PathLike[str],
     max_bytes: int,
-    windows: list[int],
+    windows: Sequence[int],
 ) -> dict[str, Any]:
     """Load a checkpoint and evaluate it on selected byte documents."""
     from tmt.benchmark import evaluate

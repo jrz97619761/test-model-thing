@@ -261,7 +261,7 @@ def test_loss(loss_case, target, end, ce_only):
 
 def test_rtu_gradients(monkeypatch):
     import mlx.core as mx
-    from tmt.cli import load_config
+    from tmt.config import load_config
     from tmt.model import Model
 
     random.seed(11)
