@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-TOPICS = ('init', 'train', 'sweep', 'evaluate', 'benchmark', 'generate', 'help')
+TOPICS = (
+    'init', 'train', 'sweep', 'evaluate', 'benchmark', 'generate', 'inspect', 'help'
+)
 BASE_ARGV = {
     'train': 'train --data train.bin --run invalid --seed 11',
     'sweep': 'sweep --grid grid.json --data train.bin --development dev.bin '
@@ -19,6 +21,8 @@ BASE_ARGV = {
 RUN_NAME = 'run must be one relative folder name'
 EVAL_PAIR = 'eval-data and eval-every must be used together'
 TEMPERATURE = 'temperature must be a finite nonnegative number'
+SYNTAX = 'invalid JSON in syntax.json: Expecting'
+NO_TARGETS = 'evaluation requires at least one target byte pair'
 INVALID_OPTION_VALUES = {  # id: (extra options, expected stderr fragment)
     'train-sample-prompt': ("--sample-prompt ''", 'sample-prompt must not be empty'),
     'train-sample-bytes': ('--sample-bytes 0', 'sample-bytes must be positive'),
@@ -31,17 +35,26 @@ INVALID_OPTION_VALUES = {  # id: (extra options, expected stderr fragment)
     ),
     'train-eval-max-bytes': ('--eval-max-bytes 0', 'eval-max-bytes must be positive'),
     'train-updates': ('--updates 0', 'updates must be positive'),
+    'train-save-every': ('--save-every 0', 'save-every must be positive'),
+    'sweep-save-every': ('--save-every -1', 'save-every must be positive'),
     'run-empty': ("--run ''", RUN_NAME),
     'run-parent': ('--run ..', RUN_NAME),
     'run-absolute': ('--run /absolute-name', RUN_NAME),
     'run-nested': ('--run nested/name', RUN_NAME),
     'run-backslash': ("--run 'nested\\name'", RUN_NAME),
     'train-bad-config': ('--config bad.json', 'model config.dim'),
+    'train-config-syntax': ('--config syntax.json', SYNTAX),
+    'train-eval-no-targets': ('--eval-data short.bin --eval-every 1', NO_TARGETS),
+    'sweep-config-syntax': ('--config syntax.json', SYNTAX),
+    'sweep-grid-syntax': ('--grid syntax.json', SYNTAX),
+    'sweep-eval-no-targets': ('--eval-data short.bin --eval-every 1', NO_TARGETS),
+    'sweep-development-no-targets': ('--development short.bin', NO_TARGETS),
     'sweep-updates': ('--updates -1', 'updates must be positive'),
     'sweep-max-bytes': ('--max-bytes 0', 'max-bytes must be positive'),
     'sweep-sample-bytes': ('--sample-bytes -1', 'sample-bytes must be positive'),
     'evaluate-windows': ('--windows 0', 'evaluation windows must be positive'),
     'evaluate-max-bytes': ('--max-bytes -1', 'max-bytes must be positive'),
+    'evaluate-no-targets': ('--data short.bin', NO_TARGETS),
     'generate-log-every': ('--log-every 0', 'log-every must be positive'),
     'generate-negative-bytes': ('--bytes -1', 'bytes must be nonnegative'),
     'generate-temperature-nan': ('--temperature=nan', TEMPERATURE),
@@ -50,6 +63,10 @@ INVALID_OPTION_VALUES = {  # id: (extra options, expected stderr fragment)
     'generate-temperature-negative': ('--temperature=-1', TEMPERATURE),
     'generate-missing-checkpoint': ('', "'missing.safetensors'"),
     'generate-empty-prompt': ("--prompt ''", 'generation needs a nonempty prompt'),
+    'generate-output-folder': (
+        '--output missing/sample.bin',
+        'output folder missing does not exist',
+    ),
     'benchmark-epochs': ('--epochs 0', 'epochs must be positive with cola-data'),
 }
 HELP_ERRORS = {  # id: (argv, expected stderr fragment)
@@ -69,7 +86,7 @@ SWEEP_MISSING = (
     'sweep --grid missing.json --data missing/* --development missing/* '
     '--output invalid'
 )
-OPERATIONS = 'new load generate train train-sample sweep sweep-sample benchmark'.split()
+OPERATIONS = 'new generate train train-sample sweep sweep-sample benchmark'.split()
 SEED_ARGV = {  # even cases get seed -1, odd cases get 2**64
     'train-seed': 'train --data missing/* --run valid --seed',
     'train-sample-seed': 'train --data missing/* --run valid --seed 11 --sample-seed',
@@ -98,6 +115,7 @@ def manual():
                 'command': 'train',
                 'config': None,
                 'log_every': 100,
+                'save_every': 500,
                 'checkpoint': None,
                 'resume': False,
             },
@@ -109,6 +127,7 @@ def manual():
                 'command': 'sweep',
                 'config': 'model.json',
                 'log_every': 100,
+                'save_every': 500,
                 'max_bytes': 8192,
             },
         ),
@@ -127,7 +146,13 @@ def manual():
         ),
         (
             'benchmark model.safetensors --seed 11',
-            {'command': 'benchmark', 'epochs': 1, 'split': 0.5, 'cola_data': None},
+            {
+                'command': 'benchmark',
+                'epochs': 1,
+                'split': 0.5,
+                'cola_data': None,
+                'output': None,
+            },
         ),
         ('init', {'command': 'init', 'output': None}),
     ],
@@ -152,7 +177,7 @@ def test_shared_training_arguments(argv):
     from tmt.cli import build_parser
 
     options = (
-        "--data 'train/*' --updates 3 --log-every 2 --seed 22 --ce-only "
+        "--data 'train/*' --updates 3 --log-every 2 --save-every 5 --seed 22 --ce-only "
         '--sample-every 1 --sample-prompt X --sample-seed 33 --sample-bytes 4 '
         "--eval-data 'dev/*' --eval-every 2 --eval-max-bytes 8"
     )
@@ -161,6 +186,7 @@ def test_shared_training_arguments(argv):
         'data': 'train/*',
         'updates': 3,
         'log_every': 2,
+        'save_every': 5,
         'seed': 22,
         'ce_only': True,
         'sample_every': 1,
@@ -190,15 +216,6 @@ def test_every_command_has_handler_and_manual_section(manual):
         assert f'\n## {command.name}\n' in manual
 
 
-def test_evaluate_windows_default_is_not_shared():
-    from tmt.cli import build_parser
-
-    argv = ['evaluate', 'model.safetensors', '--data', 'dev.bin']
-    first = build_parser().parse_args(argv).windows
-    assert isinstance(first, tuple)
-    assert build_parser().parse_args(argv).windows == ()
-
-
 @pytest.mark.parametrize(
     ('metadata', 'commit'),
     [(None, 'unknown'), ('{"vcs_info":{"commit_id":"abc123"}}', 'abc123')],
@@ -206,6 +223,7 @@ def test_evaluate_windows_default_is_not_shared():
 )
 def test_version(monkeypatch, capsys, metadata, commit):
     from importlib import metadata as package_metadata
+
     from tmt.cli import main
 
     installed = SimpleNamespace(version='0.1.0', read_text=lambda name: metadata)
@@ -219,38 +237,32 @@ def test_version(monkeypatch, capsys, metadata, commit):
 @pytest.mark.parametrize(
     ('module', 'argv', 'code', 'stdout_start', 'stderr_has'),
     [
-        ('tmt', '--help', 0, 'usage: tmt', ''),
         ('tmt', '--version', 0, 'tmt ', ''),
-        ('tmt', 'help', 0, '# TMT command manual', ''),
-        ('tmt', 'help train', 0, '## train', ''),
-        ('tmt', 'generate --help', 0, '## generate', ''),
+        ('tmt', '--version --help', 0, 'tmt ', ''),
+        ('tmt', '--help --version', 0, 'usage: tmt', ''),
+        ('tmt', '--seed 1 --help', 2, '', 'tmt: error:'),
         ('tmt', 'train --data missing/* --seed -1', 1, '', 'seed must be between'),
         ('tmt.benchmark', '--help', 0, '## benchmark', ''),
     ],
     ids=[
-        '--help',
-        '--version',
-        'help',
-        'help-train',
-        'generate-help',
+        'version',
+        'version-first',
+        'help-first',
+        'unknown-option-first',
         'seed-error',
         'benchmark-module-help',
     ],
 )
 def test_model_free_commands(
-    model_free_cli, tmp_path, manual, module, argv, code, stdout_start, stderr_has
+    model_free_cli, tmp_path, module, argv, code, stdout_start, stderr_has
 ):
     result = model_free_cli(*shlex.split(argv), module=module)
     assert result.returncode == code, result.stderr
     assert result.stdout.startswith(stdout_start)
     assert stderr_has in result.stderr
+    assert 'unknown help topic' not in result.stderr
     assert 'Traceback' not in result.stderr
     assert list(tmp_path.iterdir()) == []
-    if (module, argv) == ('tmt', '--help'):
-        assert 'tmt help' in result.stdout
-        assert '## init' not in result.stdout
-    if (module, argv) == ('tmt', 'help'):
-        assert result.stdout == manual
 
 
 @pytest.mark.parametrize(
@@ -281,6 +293,7 @@ def test_help_forms_need_no_setup(tmp_path, model_free_cli, manual, argv):
     assert list(tmp_path.iterdir()) == []
     if argv in (['--help'], ['-h']):
         assert result.stdout.startswith('usage: tmt')
+        assert 'tmt help' in result.stdout
         assert '## init' not in result.stdout
     elif argv == ['help']:
         assert result.stdout == manual
@@ -346,10 +359,6 @@ def test_manual_topics(run_cli, manual):
         for form in forms:
             argv = form.format(topic).split()
             assert run_cli(*argv) == (0, expected, ''), argv
-    code, stdout, stderr = run_cli('-h')
-    assert (code, stderr) == (0, '')
-    assert 'tmt help' in stdout
-    assert '## init' not in stdout
 
 
 @pytest.mark.parametrize(
@@ -373,28 +382,6 @@ def test_manual_topic(argv, expected):
     from tmt.cli import _manual_topic
 
     assert _manual_topic(argv) == expected
-
-
-@pytest.mark.parametrize(
-    ('argv', 'code', 'stdout_start'),
-    [
-        ('--version --help', 0, 'tmt '),
-        ('--help --version', 0, 'usage: tmt'),
-        ('--seed 1 --help', 2, ''),
-    ],
-    ids=['version-first', 'help-first', 'unknown-option-first'],
-)
-def test_option_first_help_uses_parser(
-    model_free_cli, tmp_path, argv, code, stdout_start
-):
-    result = model_free_cli(*argv.split())
-    assert result.returncode == code, result.stderr
-    assert result.stdout.startswith(stdout_start)
-    assert 'unknown help topic' not in result.stderr
-    assert 'Traceback' not in result.stderr
-    if code:
-        assert 'tmt: error:' in result.stderr
-    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -471,34 +458,31 @@ def test_training_validation_order(run_cli, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+SWEEP_PATHS = ('missing.json', 'missing/*', 'missing/*', 'unused', 'model.json')
+
+
 @pytest.mark.parametrize('operation', OPERATIONS)
 def test_direct_seed_validation(monkeypatch, forbid_call, operation):
     from tmt import runtime, validation
     from tmt.benchmark import run
-    from tmt.checkpoint import load_model, new_model
+    from tmt.checkpoint import new_model
     from tmt.runtime import generate, sweep, train
 
     monkeypatch.setattr(validation, 'model_settings', forbid_call)
     monkeypatch.setattr(validation, 'checkpoint_header', forbid_call)
-    for name in 'load_config _input_files'.split():
+    for name in 'load_config ByteFiles'.split():
         monkeypatch.setattr(runtime, name, forbid_call)
     monkeypatch.setattr(runtime, 'TrainingRun', forbid_call)
     seed = (-1, 2**64, True, 1.5)[OPERATIONS.index(operation) % 4]
     calls = {
         'new': lambda: new_model({}, seed),
-        'load': lambda: load_model('missing.safetensors', seed),
         'generate': lambda: generate('missing.safetensors', 'X', 'unused.bin', seed),
-        'train': lambda: train({}, 'unused/model.safetensors', 'missing/*', seed=seed),
+        'train': lambda: train({}, 'unused/model.safetensors', 'missing/*', 1, seed),
         'train-sample': lambda: train(
-            {}, 'unused/model.safetensors', 'missing/*', seed=11, sample_seed=seed
+            {}, 'unused/model.safetensors', 'missing/*', 1, 11, sample_seed=seed
         ),
-        'sweep': lambda: sweep(
-            'missing.json', 'missing/*', 'missing/*', 'unused', seed=seed
-        ),
-        'sweep-sample': lambda: sweep(
-            'missing.json', 'missing/*', 'missing/*', 'unused', seed=11,
-            sample_seed=seed,
-        ),
+        'sweep': lambda: sweep(*SWEEP_PATHS, 1, seed),
+        'sweep-sample': lambda: sweep(*SWEEP_PATHS, 1, 11, sample_seed=seed),
         'benchmark': lambda: run(
             'missing.safetensors', model=SimpleNamespace(freeze=forbid_call), seed=seed
         ),
@@ -508,38 +492,25 @@ def test_direct_seed_validation(monkeypatch, forbid_call, operation):
         calls[operation]()
 
 
-@pytest.mark.parametrize(
-    ('operation', 'error', 'message'),
-    [
-        ('train', ValueError, 'seed must be an integer'),
-        ('sweep', ValueError, 'seed must be an integer'),
-        ('generate', ValueError, 'seed must be an integer'),
-        ('benchmark', TypeError, 'seed'),
-    ],
-)
-def test_direct_primary_seed_is_required(operation, error, message):
+def test_direct_primary_seed_has_no_default():
+    import inspect
+
     from tmt.benchmark import run
     from tmt.runtime import generate, sweep, train
 
-    calls = {
-        'train': lambda: train({}, 'unused/model.safetensors', 'missing/*'),
-        'sweep': lambda: sweep(
-            'missing.json', 'missing/*', 'missing/*', 'unused'
-        ),
-        'generate': lambda: generate(
-            'missing.safetensors', 'x', 'unused.bin'
-        ),
-        'benchmark': lambda: run('missing.safetensors'),
-    }
-    with pytest.raises(error, match=message):
-        calls[operation]()
+    for function in (train, sweep, generate, run):
+        seed = inspect.signature(function).parameters['seed']
+        assert seed.default is inspect.Parameter.empty, function.__name__
 
 
 @pytest.mark.parametrize('case', INVALID_OPTION_VALUES)
 def test_invalid_option_values(workspace, run_cli, case):
+    """Each input error stops before model work and leaves no output."""
     extra, message = INVALID_OPTION_VALUES[case]
     command = 'train' if case.startswith('run-') else case.split('-')[0]
     (workspace / 'bad.json').write_text('{"dim": true}')
+    (workspace / 'syntax.json').write_text('{"dim": 4,')
+    (workspace / 'short.bin').write_bytes(b'x')
     kept = case in ('generate-negative-bytes', 'generate-temperature-negative')
     if kept:
         (workspace / 'sample.bin').write_bytes(b'keep')
@@ -548,7 +519,7 @@ def test_invalid_option_values(workspace, run_cli, case):
     assert message in stderr
     if kept:
         assert (workspace / 'sample.bin').read_bytes() == b'keep'
-    absent = ['runs', 'invalid', 'score.json', 'absolute-name']
+    absent = ['runs', 'invalid', 'score.json', 'absolute-name', 'missing']
     for name in absent + ([] if kept else ['sample.bin']):
         assert not (workspace / name).exists(), name
 
@@ -586,39 +557,43 @@ def test_input_errors_leave_no_output(workspace, run_cli, case):
         assert record['error'] is None
 
 
-@pytest.mark.parametrize('limit,expected', [(6, [b'abcd', b'ef']), (1, [b'a'])])
-def test_documents_budget(tmp_path, limit, expected):
-    from tmt.runtime import documents
+def test_fresh_train_keeps_existing_checkpoint(
+    workspace, run_cli, monkeypatch, forbid_call
+):
+    (workspace / 'model.safetensors').write_bytes(b'keep')
+    monkeypatch.setattr('tmt.runtime.new_model', forbid_call)
+    code, stdout, stderr = run_cli(
+        'train', 'model.safetensors', '--data', 'train.bin', '--seed', '11'
+    )
+    assert (code, stdout) == (1, '')
+    assert stderr == (
+        'tmt: error: checkpoint model.safetensors exists; '
+        'use --resume, or remove it\n'
+    )
+    assert (workspace / 'model.safetensors').read_bytes() == b'keep'
+    assert not (workspace / 'manifest').exists()
 
-    (tmp_path / 'a.bin').write_bytes(b'abcd')
-    (tmp_path / 'b.bin').write_bytes(b'efgh')
-    assert list(documents(str(tmp_path / '*.bin'), limit)) == expected
 
-
-def test_byte_files_rejects_unmatched_selection(tmp_path):
+@pytest.mark.parametrize(
+    ('selection', 'error'),
+    [('*.bin', FileNotFoundError), ('selected', IsADirectoryError)],
+    ids=['unmatched', 'directory'],
+)
+def test_byte_files_rejects_bad_selection(tmp_path, selection, error):
     from tmt.data import ByteFiles
 
-    with pytest.raises(FileNotFoundError, match='no files matched'):
-        ByteFiles(str(tmp_path / '*.bin'))
+    (tmp_path / 'selected').mkdir()
+    with pytest.raises(error):
+        ByteFiles(str(tmp_path / selection))
 
 
-def test_byte_files_rejects_directory_selection(tmp_path):
-    from tmt.data import ByteFiles
+def test_byte_files_keep_empty_files_and_share_budget(tmp_path):
+    from tmt.data import ByteFiles, documents
 
-    directory = tmp_path / 'selected'
-    directory.mkdir()
-    with pytest.raises(IsADirectoryError):
-        ByteFiles(str(directory))
-
-
-def test_byte_files_documents_keep_empty_files_and_share_budget(tmp_path):
-    from tmt.data import ByteFiles
-
-    (tmp_path / 'a.bin').write_bytes(b'')
-    (tmp_path / 'b.bin').write_bytes(b'abcd')
-    (tmp_path / 'c.bin').write_bytes(b'')
-    (tmp_path / 'd.bin').write_bytes(b'efgh')
-    files = ByteFiles(str(tmp_path / '*.bin'))
+    for name, content in (('a', b''), ('b', b'abcd'), ('c', b''), ('d', b'efgh')):
+        (tmp_path / f'{name}.bin').write_bytes(content)
+    pattern = str(tmp_path / '*.bin')
+    files = ByteFiles(pattern)
 
     assert [Path(path).name for path in files.paths] == [
         'a.bin',
@@ -627,22 +602,29 @@ def test_byte_files_documents_keep_empty_files_and_share_budget(tmp_path):
         'd.bin',
     ]
     assert list(files.documents()) == [b'', b'abcd', b'', b'efgh']
-    assert list(files.documents(6)) == [b'', b'abcd', b'', b'ef']
+    assert list(documents(pattern, 6)) == [b'', b'abcd', b'', b'ef']
+    assert list(documents(pattern, 1)) == [b'', b'a']
 
 
 def test_generate(checkpoint, tmp_path, capsys):
+    import mlx.core as mx
+
     from tmt.runtime import generate
 
     path, original = checkpoint.path, checkpoint.path.read_bytes()
     first_path, second_path = tmp_path / 'first.bin', tmp_path / 'second.bin'
-    first = generate(path, 'The ', first_path, 11, 16, log_every=5)
+    mx.random.seed(5)
+    rng_before = mx.array(mx.random.state[0])
+    first = generate(path, 'The ', first_path, 11, count=16, log_every=5)
+    assert mx.array_equal(mx.random.state[0], rng_before).item()
     lines = capsys.readouterr().out.splitlines()
-    assert [line for line in lines if line.startswith('generated bytes:')] == [
+    assert lines == [
         'generated bytes: 5/16',
         'generated bytes: 10/16',
         'generated bytes: 15/16',
+        f'wrote output: {first_path}, bytes: 16',
     ]
-    second = generate(path, 'The ', second_path, 11, 16)
+    second = generate(path, 'The ', second_path, 11, count=16)
     assert len(first) == len(second) == 16
     assert first == second
     assert first_path.read_bytes() == first
@@ -652,7 +634,7 @@ def test_generate(checkpoint, tmp_path, capsys):
     assert generate(path, 'The ', first_path, seed=11, count=0) == b''
     assert first_path.read_bytes() == b''
     for seed in (0, 2**64 - 1):
-        assert len(generate(path, 'X', tmp_path / 'sample.bin', seed, 1)) == 1
+        assert len(generate(path, 'X', tmp_path / 'sample.bin', seed, count=1)) == 1
 
 
 def test_generate_temperature_floor(checkpoint, tmp_path):
@@ -661,7 +643,32 @@ def test_generate_temperature_floor(checkpoint, tmp_path):
     path, output = checkpoint.path, tmp_path / 'sample.bin'
     minimum = generate(path, 'The ', output, seed=11, count=2, temperature=0.1)
     for temperature in (0, 0.05):
-        assert generate(path, 'The ', output, 11, 2, temperature) == minimum
+        sample = generate(path, 'The ', output, 11, count=2, temperature=temperature)
+        assert sample == minimum
+
+
+def test_inspect_command(workspace, checkpoint, run_cli):
+    code, _, stderr = run_cli(
+        'train', '--data', 'train.bin', '--run', 'a', '--updates', '3', '--seed', '11'
+    )
+    assert code == 0, stderr
+    code, stdout, stderr = run_cli('inspect', 'runs/a/model.safetensors')
+    assert (code, stderr) == (0, '')
+    settings = json.loads((workspace / 'model.json').read_text())
+    assert stdout.splitlines() == [
+        f'checkpoint: runs/a/model.safetensors, step: 3, '
+        f'trainable parameters: {checkpoint.model.count()}',
+        f'config: {json.dumps(settings)}',
+        'run status: complete, objective: tmt, seed: 11, updates: 3',
+    ]
+    code, stdout, _ = run_cli('inspect', str(checkpoint.path))
+    assert code == 0
+    assert stdout.splitlines()[0].startswith(f'checkpoint: {checkpoint.path}, step: 0,')
+    assert stdout.splitlines()[-1] == 'run manifest: none'
+    (workspace / 'invalid.safetensors').write_bytes(b'invalid')
+    code, stdout, stderr = run_cli('inspect', 'invalid.safetensors')
+    assert (code, stdout) == (1, '')
+    assert stderr.startswith('tmt: error: invalid checkpoint:')
 
 
 def test_evaluate_command(workspace, checkpoint, run_cli):
@@ -672,6 +679,8 @@ def test_evaluate_command(workspace, checkpoint, run_cli):
     assert code == 0, stderr
     score = json.loads((workspace / 'score.json').read_text())
     assert (score['input_bytes'], score['targets']) == (2, 1)
+    assert list(score)[-2:] == ['checkpoint', 'optimizer_step']
+    assert (score['checkpoint'], score['optimizer_step']) == (str(checkpoint.path), 0)
     (workspace / 'invalid.safetensors').write_bytes(b'invalid')
     code, _, stderr = run_cli('evaluate', 'invalid.safetensors', '--data', 'dev.bin')
     assert code == 1
@@ -691,10 +700,12 @@ def test_evaluate_command(workspace, checkpoint, run_cli):
     ],
     ids=['console-script', 'python-m'],
 )
-def test_train_sigint_saves_checkpoint(workspace, snapshot, launch):
+@pytest.mark.parametrize('signal_name', ['SIGINT', 'SIGTERM'])
+def test_train_signal_saves_checkpoint(workspace, snapshot, launch, signal_name):
     import signal
     import subprocess
     import sys
+
     from tmt.checkpoint import load_checkpoint
     from tmt.runtime import train
 
@@ -703,14 +714,14 @@ import os
 import signal
 from tmt.model import Model
 
-update = Model.updategrads
+update = Model.update_gradients
 def interrupt(model, grads):
-    os.kill(os.getpid(), signal.SIGINT)
+    os.kill(os.getpid(), signal.SIGNAL_NAME)
     return update(model, grads)
-Model.updategrads = interrupt
+Model.update_gradients = interrupt
 ARGV = ['train', '--data', 'train.bin', '--run', 'interrupted',
         '--seed', '11', '--updates', '3']
-""" + launch
+""".replace('SIGNAL_NAME', signal_name) + launch
     result = subprocess.run(
         [sys.executable, '-c', script], cwd=workspace,
         capture_output=True, text=True, timeout=30,
@@ -723,7 +734,7 @@ ARGV = ['train', '--data', 'train.bin', '--run', 'interrupted',
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
     assert record['status'] == 'interrupted'
     assert record['completed_updates'] == 1
-    loaded, settings = load_checkpoint(checkpoint, 11)
+    loaded, settings = load_checkpoint(checkpoint)
     expected = train(
         settings, workspace / 'reference/model.safetensors', 'train.bin', 1, 11
     )
@@ -736,6 +747,7 @@ def raise_interrupt(*args, **kwargs):
 
 def test_console_main_reports_interrupt_once(monkeypatch, capsys):
     import sys
+
     from tmt import cli
 
     previous = []
@@ -751,6 +763,7 @@ def test_console_main_reports_interrupt_once(monkeypatch, capsys):
 
 def test_main_leaves_interrupt_to_caller(monkeypatch):
     import sys
+
     from tmt import cli
 
     hook = sys.excepthook
@@ -768,7 +781,7 @@ def test_console_script_uses_console_main():
 
 
 def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
-    from tmt.checkpoint import load_model
+    from tmt.checkpoint import load_checkpoint
 
     root = tmp_path
     assert '## init' in cli('help', 'init').stdout
@@ -802,7 +815,7 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
         {'completed_updates': 2, 'input_bytes': 3, 'targets': 2},
         {'completed_updates': 3, 'input_bytes': 3, 'targets': 2},
     ]
-    model, settings = load_model(checkpoint, 11)
+    model, settings = load_checkpoint(checkpoint)
     expected = {'dim': 4, 'layers': 1, 'spread': 4}
     assert {k: settings[k] for k in expected} == expected
     assert model.optimizer.state['step'].item() == 3
@@ -826,7 +839,7 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
         *('train', str(checkpoint), '--data', 'data/resume/*', '--resume'),
         *('--updates', '2', '--seed', '99', '--ce-only'),
     )
-    assert load_model(checkpoint, 99)[0].optimizer.state['step'].item() == 5
+    assert load_checkpoint(checkpoint)[0].optimizer.state['step'].item() == 5
     record = json.loads(manifest.read_text())
     assert set(record) == manifest_fields
     expected = {
@@ -855,7 +868,7 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
         *('--bytes', '4', '--seed', '11'),
     )
     assert len((root / 'sample.bin').read_bytes()) == 4
-    assert '390 targets' in cli('benchmark', str(checkpoint), '--seed', '11').stdout
+    assert 'targets: 390' in cli('benchmark', str(checkpoint), '--seed', '11').stdout
     (root / 'g.json').write_text('{"seed": [11]}')
     sweep = (
         *('sweep', '--grid', 'g.json', '--data', 'data/train/*'),

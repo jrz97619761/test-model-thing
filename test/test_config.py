@@ -1,5 +1,4 @@
 import json
-import inspect
 from pathlib import Path
 
 import pytest
@@ -105,6 +104,7 @@ def test_load_config(tmp_path, monkeypatch):
     assert config.load_config() == defaults
     expected = {**config.MODEL_DEFAULTS, 'bound': list(config.MODEL_DEFAULTS['bound'])}
     assert defaults == expected
+    validation.model_settings(dict(config.MODEL_DEFAULTS), 'model config')
     parameters = inspect.signature(Model).parameters
     assert set(defaults) == set(parameters), (
         'config fields differ from constructor fields'
@@ -193,9 +193,9 @@ def test_extension_fields(monkeypatch, tmp_path, default, value, message):
 @pytest.mark.parametrize(
     ('contents', 'error', 'message'),
     [
-        ('{', json.JSONDecodeError, None),
+        ('{', ValueError, r'invalid JSON in .*model\.json: Expecting'),
         ('[]', ValueError, 'model config must be a JSON object'),
-        ('{"unknown": 1}', ValueError, "unexpected keyword argument 'unknown'"),
+        ('{"unknown": 1}', ValueError, "model config has unknown field 'unknown'"),
     ],
     ids=['invalid-json', 'not-object', 'unknown-field'],
 )
@@ -283,7 +283,8 @@ def test_init_preserves_files(run_cli, tmp_path, args):
 @pytest.mark.parametrize(('fault', 'parts'), FILE_FAULTS.items(), ids=list(FILE_FAULTS))
 def test_checkpoint_rejects_invalid_files(checkpoint, fault, parts):
     import mlx.core as mx
-    from tmt.checkpoint import load_model
+
+    from tmt.checkpoint import load_checkpoint
 
     path, arrays = checkpoint.path, dict(checkpoint.arrays)
     header, tmt, raw = json.loads(checkpoint.metadata['tmt']), None, None
@@ -324,7 +325,7 @@ def test_checkpoint_rejects_invalid_files(checkpoint, fault, parts):
         )
         mx.save_safetensors(path, arrays, metadata=metadata)
     with pytest.raises(ValueError) as error:
-        load_model(path, 11)
+        load_checkpoint(path)
     for part in parts:
         assert part in str(error.value), f'message is missing {part!r}: {error.value}'
 
@@ -335,6 +336,7 @@ def test_checkpoint_failure_preserves_destination(
     monkeypatch, checkpoint, exists, failure
 ):
     import mlx.core as mx
+
     from tmt import checkpoint as storage
 
     path = checkpoint.path if exists else checkpoint.path.with_name('new.safetensors')
@@ -368,6 +370,7 @@ def test_checkpoint_failure_preserves_destination(
 @pytest.mark.parametrize('mode', [0o200, 0o600, 0o640, 0o644, 0o660])
 def test_checkpoint_replaces_existing_file(checkpoint, snapshot, mode):
     import stat
+
     from tmt.checkpoint import load_checkpoint, save_checkpoint
 
     original = checkpoint.path.read_bytes()
@@ -377,13 +380,14 @@ def test_checkpoint_replaces_existing_file(checkpoint, snapshot, mode):
     assert stat.S_IMODE(checkpoint.path.stat().st_mode) == mode
     checkpoint.path.chmod(0o600)
     assert checkpoint.path.read_bytes() != original
-    loaded, _ = load_checkpoint(checkpoint.path, 11)
+    loaded, _ = load_checkpoint(checkpoint.path)
     assert snapshot(loaded) == snapshot(checkpoint.model)
     assert list(checkpoint.path.parent.iterdir()) == [checkpoint.path]
 
 
 def test_checkpoint_permission_failure_preserves_destination(monkeypatch, checkpoint):
     import stat
+
     from tmt import checkpoint as storage
 
     checkpoint.path.chmod(0o640)
@@ -406,7 +410,9 @@ def test_checkpoint_permission_failure_preserves_destination(monkeypatch, checkp
 )
 def test_checkpoint_load_preserves_rng(monkeypatch, checkpoint, failure):
     import random
+
     import mlx.core as mx
+
     from tmt import checkpoint as storage
 
     if failure == 'constructor':
@@ -441,11 +447,11 @@ def test_checkpoint_load_preserves_rng(monkeypatch, checkpoint, failure):
     mx.random.state[0][...] = mlx_state
 
     if failure is None:
-        storage.load_checkpoint(checkpoint.path, 11)
+        storage.load_checkpoint(checkpoint.path)
     else:
         error = KeyboardInterrupt if failure == 'interrupt' else ValueError
         with pytest.raises(error):
-            storage.load_checkpoint(checkpoint.path, 11)
+            storage.load_checkpoint(checkpoint.path)
     assert random.getstate() == python_state
     assert mx.array_equal(mx.random.state[0], mlx_state).item()
     assert random.random() == expected_python
@@ -458,6 +464,7 @@ def test_checkpoint_load_preserves_rng(monkeypatch, checkpoint, failure):
 
 def test_checkpoint_load_preserves_compiled_rng(checkpoint):
     import mlx.core as mx
+
     from tmt.checkpoint import load_checkpoint
 
     draw = mx.compile(
@@ -468,13 +475,11 @@ def test_checkpoint_load_preserves_compiled_rng(checkpoint):
     mx.random.seed(817)
     expected = draw().tolist()
     mx.random.seed(817)
-    load_checkpoint(checkpoint.path, 11)
+    load_checkpoint(checkpoint.path)
     assert draw().tolist() == expected
 
 
-def test_checkpoint_loader_names_require_same_seed_signature():
-    from tmt.checkpoint import load_checkpoint, load_model
-
-    checkpoint_signature = inspect.signature(load_checkpoint)
-    assert inspect.signature(load_model) == checkpoint_signature
-    assert checkpoint_signature.parameters['seed'].default is inspect.Parameter.empty
+@pytest.mark.parametrize('value', [0, -1, float('nan')])
+def test_positive_rejects_nonpositive_and_nan(value):
+    with pytest.raises(ValueError, match='x must be positive'):
+        validation.positive(value, 'x')

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import glob
+import dataclasses
 import itertools
 import json
 import math
@@ -10,21 +10,18 @@ import random
 import signal
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from os import PathLike
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 from . import validation
-from .checkpoint import (
-    load_checkpoint,
-    new_model,
-    save_checkpoint as write_checkpoint,
-)
+from .checkpoint import load_checkpoint, new_model, preserved_rng
+from .checkpoint import save_checkpoint as write_checkpoint
 from .config import load_config
-from .data import ByteFiles
+from .data import ByteFiles, documents
 from .records import (
     RunManifest,
     RunStatus,
@@ -32,6 +29,7 @@ from .records import (
     append_jsonl,
     build_run_manifest,
     build_sweep_manifest,
+    read_json,
     write_json,
 )
 
@@ -39,18 +37,6 @@ if TYPE_CHECKING:
     import mlx.core as mx
 
     from .model import Model
-
-
-def _input_files(pattern: str | PathLike[str]) -> list[str]:
-    """Resolve a selection and check that every selected file is readable."""
-    return ByteFiles(pattern).paths
-
-
-def documents(
-    pattern: str | PathLike[str], max_bytes: int | None = None
-) -> Iterator[bytes]:
-    """Yield sorted raw files with an optional prefix across all file bytes."""
-    yield from ByteFiles(pattern).documents(max_bytes)
 
 
 def _training_sample(model: Model, prompt: str, count: int, seed: int) -> bytes:
@@ -104,6 +90,7 @@ class TrainingRun:
     log_every: int
     monitor: MonitorOptions
     new_run: bool = False
+    save_every: int = 500
     files: list[str] = field(default_factory=list)
     evaluation_data: list[bytes] | None = None
     model: Model = field(init=False)
@@ -121,23 +108,23 @@ class TrainingRun:
     started: float = 0.0
     last_report: float = 0.0
     sample_dir: Path = field(init=False)
-    status: RunStatus = 'failed'
+    stamp: str = ''
+    status: RunStatus = 'running'
     interrupted: bool = False
-    mx: Any = None
 
     def setup(self) -> None:
         """Load inputs and model, then create the run manifest paths."""
-        import mlx.core as mx
-
-        self.mx = mx
-        self.files = _input_files(self.pattern)
-        self.evaluation_data = (
-            None
-            if self.monitor.eval_data is None
-            else list(documents(self.monitor.eval_data, self.monitor.eval_max_bytes))
-        )
+        self.files = ByteFiles(self.pattern).paths
+        evaluation_files = []
+        if self.monitor.eval_data is not None:
+            selection = ByteFiles(self.monitor.eval_data)
+            evaluation_files = selection.paths
+            self.evaluation_data = list(
+                selection.documents(self.monitor.eval_max_bytes)
+            )
+            validation.evaluation_targets(self.evaluation_data)
         if self.resume:
-            self.model, self.settings = load_checkpoint(self.path, self.seed)
+            self.model, self.settings = load_checkpoint(self.path)
         else:
             self.model = new_model(self.settings, self.seed)
         random.Random(self.seed).shuffle(self.files)
@@ -159,7 +146,7 @@ class TrainingRun:
             log_every=self.log_every,
             objective='ce_only' if self.ce_only else 'tmt',
             resume=self.resume,
-            initial_optimizer_step=self.optimizer_step if self.resume else 0,
+            initial_optimizer_step=self.optimizer_step,
             sample=None
             if self.monitor.sample_every is None
             else {
@@ -174,28 +161,22 @@ class TrainingRun:
                 'every': self.monitor.eval_every,
                 'data_glob': self.monitor.eval_data,
                 'max_bytes': self.monitor.eval_max_bytes,
-                'data_files': [
-                    str(Path(name).resolve())
-                    for name in sorted(
-                        glob.glob(self.monitor.eval_data, recursive=True)
-                    )
-                ],
+                'data_files': [str(Path(name).resolve()) for name in evaluation_files],
             },
             started_at=datetime.now(timezone.utc).isoformat(),
             last_checkpoint=(
                 str(self.checkpoint.resolve()) if self.resume else None
             ),
+            optimizer_step=self.optimizer_step,
+            save_every=self.save_every,
         )
         self.started = self.last_report = time.perf_counter()
-        self.sample_dir = (
-            self.checkpoint.parent
-            / 'samples'
-            / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
-        )
+        self.stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+        self.sample_dir = self.checkpoint.parent / 'samples' / self.stamp
 
     @property
     def optimizer_step(self) -> int:
-        """Total optimizer updates in the model, including any *before a resume*."""
+        """Total optimizer updates in the model, including any before a resume."""
         return int(self.model.optimizer.state['step'].item())
 
     def report_loss(self) -> None:
@@ -263,7 +244,7 @@ class TrainingRun:
         """Score held-out documents and write an evaluation row."""
         if self.evaluation_data is None:
             raise RuntimeError('evaluation data is not configured')
-        from tmt.benchmark import evaluate
+        from .benchmark import evaluate
 
         result = evaluate(self.model, self.evaluation_data)
         append_jsonl(
@@ -282,11 +263,14 @@ class TrainingRun:
         self.evaluated = self.completed
 
     def save_checkpoint(self) -> None:
-        """Save model and optimizer state, then update the manifest record."""
+        """Save model and optimizer state, then rewrite the manifest."""
         if self.record is None:
             raise RuntimeError('training run is not ready to save')
         write_checkpoint(self.checkpoint, self.model, self.settings)
         self.record['last_checkpoint'] = str(self.checkpoint.resolve())
+        self.record['completed_updates'] = self.completed
+        self.record['optimizer_step'] = self.optimizer_step
+        write_json(self.manifest, self.record)
         print(
             f'saved checkpoint: {self.checkpoint}, updates: {self.completed}, '
             f'step: {self.optimizer_step}'
@@ -294,7 +278,9 @@ class TrainingRun:
 
     def consume_terminal_byte(self, byte: int) -> None:
         """Advance frozen recurrent state over a document's final byte."""
-        self.model.step(self.mx.array(byte), frozen=True)
+        import mlx.core as mx
+
+        self.model.step(mx.array(byte), frozen=True)
         self.model.eval_state()
 
     def check_interrupt(self) -> None:
@@ -319,7 +305,7 @@ class TrainingRun:
             and self.completed % self.monitor.eval_every == 0
         ):
             self.report_evaluation()
-        if self.completed % 500 == 0:
+        if self.completed % self.save_every == 0:
             self.save_checkpoint()
 
     def one_data_pass(self) -> None:
@@ -347,7 +333,8 @@ class TrainingRun:
                 self.completed += 1
                 self.loss_sum += float(self.last_loss.item())
                 for name, value in components.items():
-                    self.component_sums[name] = self.component_sums.get(name, 0.0) + value
+                    total = self.component_sums.get(name, 0.0)
+                    self.component_sums[name] = total + value
                 self.after_update(end, data[-1])
                 self.check_interrupt()
                 if self.completed >= self.updates:
@@ -364,6 +351,7 @@ class TrainingRun:
             raise RuntimeError('training run is not ready to finalize')
         self.record['status'] = self.status
         self.record['completed_updates'] = self.completed
+        self.record['optimizer_step'] = self.optimizer_step
         write_json(self.manifest, self.record)
         if self.last_loss is not None and self.completed != self.logged:
             self.report_loss()
@@ -376,17 +364,22 @@ class TrainingRun:
         def request_interrupt(signum, frame):
             self.interrupted = True
 
-        previous_handler = (
-            signal.getsignal(signal.SIGINT)
-            if threading.current_thread() is threading.main_thread()
-            else None
-        )
-        if previous_handler is not None:
-            signal.signal(signal.SIGINT, request_interrupt)
+        previous_handlers = {}
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                handler = signal.getsignal(signum)
+                if handler is not None:
+                    previous_handlers[signum] = handler
+                    signal.signal(signum, request_interrupt)
         try:
-            self.metrics.write_text('')
-            (self.manifest_dir / 'samples.jsonl').write_text('')
-            (self.manifest_dir / 'evaluation.jsonl').write_text('')
+            if self.resume and self.manifest.exists():
+                self.manifest.rename(
+                    self.manifest_dir / f'run.replaced-{self.stamp}.json'
+                )
+            for name in ('loss.jsonl', 'samples.jsonl', 'evaluation.jsonl'):
+                # A resume appends to the rows of earlier invocations.
+                with open(self.manifest_dir / name, 'a' if self.resume else 'w'):
+                    pass
             write_json(self.manifest, self.record)
             print(
                 f'run folder: {self.checkpoint.parent}, seed: {self.seed}, '
@@ -407,12 +400,16 @@ class TrainingRun:
         except KeyboardInterrupt:
             self.status = 'interrupted'
             raise
+        except Exception as error:
+            self.status = 'failed'
+            self.record['error'] = {'type': type(error).__name__, 'message': str(error)}
+            raise
         finally:
             try:
                 self.finalize()
             finally:
-                if previous_handler is not None:
-                    signal.signal(signal.SIGINT, previous_handler)
+                for signum, handler in previous_handlers.items():
+                    signal.signal(signum, handler)
 
         print(
             f'updates: {self.completed}, step: {self.optimizer_step}, '
@@ -425,8 +422,9 @@ def train(
     settings: dict[str, Any] | None,
     path: str | PathLike[str],
     pattern: str | PathLike[str],
-    updates: int = 1000,
-    seed: int | None = None,
+    updates: int,
+    seed: int,
+    *,
     ce_only: bool = False,
     resume: bool = False,
     log_every: int = 100,
@@ -437,14 +435,22 @@ def train(
     eval_data: str | None = None,
     eval_every: int | None = None,
     eval_max_bytes: int = 8192,
-    *,
     new_run: bool = False,
+    save_every: int = 500,
 ) -> Model:
     """Train on adjacent raw-byte pairs and record the run manifest."""
-    validation.training_options(seed, sample_seed, updates, log_every)
-    validation.monitoring(
-        sample_every, sample_prompt, sample_bytes, eval_data, eval_every, eval_max_bytes
+    monitor = MonitorOptions(
+        sample_every=sample_every,
+        sample_prompt=sample_prompt,
+        sample_seed=sample_seed,
+        sample_bytes=sample_bytes,
+        eval_data=eval_data,
+        eval_every=eval_every,
+        eval_max_bytes=eval_max_bytes,
     )
+    validation.training_options(seed, updates, log_every)
+    validation.positive(save_every, 'save-every')
+    validation.monitoring(**dataclasses.asdict(monitor))
     run = TrainingRun(
         settings=settings,
         path=path,
@@ -454,16 +460,9 @@ def train(
         ce_only=ce_only,
         resume=resume,
         log_every=log_every,
-        monitor=MonitorOptions(
-            sample_every=sample_every,
-            sample_prompt=sample_prompt,
-            sample_seed=sample_seed,
-            sample_bytes=sample_bytes,
-            eval_data=eval_data,
-            eval_every=eval_every,
-            eval_max_bytes=eval_max_bytes,
-        ),
+        monitor=monitor,
         new_run=new_run,
+        save_every=save_every,
     )
     run.setup()
     return run.run()
@@ -476,18 +475,44 @@ def evaluate_checkpoint(
     windows: Sequence[int],
 ) -> dict[str, Any]:
     """Load a checkpoint and evaluate it on selected byte documents."""
-    from tmt.benchmark import evaluate
+    validation.positive(max_bytes, 'max-bytes')
+    for window in windows:
+        validation.positive(window, 'evaluation windows')
+    from .benchmark import evaluate
 
-    model, _ = load_checkpoint(checkpoint, 0)
     data = list(documents(pattern, max_bytes))
-    return evaluate(model, data, windows)
+    validation.evaluation_targets(data)
+    model, _ = load_checkpoint(checkpoint)
+    return {
+        **evaluate(model, data, windows),
+        'checkpoint': str(checkpoint),
+        'optimizer_step': int(model.optimizer.state['step'].item()),
+    }
+
+
+def inspect_checkpoint(checkpoint: str | PathLike[str]) -> dict[str, Any]:
+    """Load a checkpoint and summarize its state and any run manifest beside it."""
+    model, settings = load_checkpoint(checkpoint)
+    summary: dict[str, Any] = {
+        'optimizer_step': int(model.optimizer.state['step'].item()),
+        'trainable_parameters': model.count(),
+        'config': settings,
+        'run': None,
+    }
+    manifest = Path(checkpoint).parent / 'manifest' / 'run.json'
+    if manifest.is_file():
+        record = read_json(manifest)
+        fields = ('status', 'objective', 'seed', 'completed_updates')
+        summary['run'] = {name: record.get(name) for name in fields}
+    return summary
 
 
 def generate(
     checkpoint: str | PathLike[str],
     prompt: str,
     output: str | PathLike[str],
-    seed: int | None = None,
+    seed: int,
+    *,
     count: int = 512,
     temperature: float | None = None,
     log_every: int = 1000,
@@ -501,29 +526,30 @@ def generate(
         temperature is None or (math.isfinite(temperature) and temperature >= 0),
         'temperature must be a finite nonnegative number',
     )
+    validation.output_folder(output)
 
     import mlx.core as mx
 
-    model, _ = load_checkpoint(checkpoint, seed)
+    model, _ = load_checkpoint(checkpoint)
     model.reset()
     if temperature is not None:
         model.temp = temperature
-    mx.random.seed(seed)
 
-    prompt = prompt.encode('utf-8')
-    for byte in prompt:
-        _, (logits, _) = model.step(mx.array(byte), frozen=True)
     generated = bytearray()
-    for _ in range(count):
-        byte = int(model.sample(logits).item())
-        generated.append(byte)
-        _, (logits, _) = model.step(mx.array(byte), frozen=True)
-        if len(generated) % log_every == 0:
-            print(f'generated bytes: {len(generated)}/{count}', flush=True)
+    with preserved_rng():
+        mx.random.seed(seed)
+        for byte in prompt.encode('utf-8'):
+            _, (logits, _) = model.step(mx.array(byte), frozen=True)
+        for _ in range(count):
+            byte = int(model.sample(logits).item())
+            generated.append(byte)
+            _, (logits, _) = model.step(mx.array(byte), frozen=True)
+            if len(generated) % log_every == 0:
+                print(f'generated bytes: {len(generated)}/{count}', flush=True)
 
     with open(output, 'wb') as file:
         file.write(generated)
-    print(f'Generated {len(generated)} bytes to {output}')
+    print(f'wrote output: {output}, bytes: {len(generated)}')
     return bytes(generated)
 
 
@@ -536,7 +562,8 @@ class SweepCandidate:
     seed: int
 
 
-class SweepExecution(NamedTuple):
+@dataclass(frozen=True)
+class SweepExecution:
     """Model, checkpoint, and development score for one completed run."""
 
     model: Model
@@ -567,6 +594,7 @@ def _run_sweep_candidate(
     updates: int,
     ce_only: bool,
     log_every: int,
+    save_every: int,
     monitor: MonitorOptions,
     development_data: list[bytes],
     evaluate: Callable[[Model, list[bytes]], dict[str, Any]],
@@ -584,16 +612,10 @@ def _run_sweep_candidate(
         pattern,
         updates,
         candidate.seed,
-        ce_only,
-        resume=False,
+        ce_only=ce_only,
         log_every=log_every,
-        sample_every=monitor.sample_every,
-        sample_prompt=monitor.sample_prompt,
-        sample_seed=monitor.sample_seed,
-        sample_bytes=monitor.sample_bytes,
-        eval_data=monitor.eval_data,
-        eval_every=monitor.eval_every,
-        eval_max_bytes=monitor.eval_max_bytes,
+        save_every=save_every,
+        **dataclasses.asdict(monitor),
     )
     score = evaluate(model, development_data)
     return SweepExecution(model=model, checkpoint=checkpoint, score=score)
@@ -634,9 +656,10 @@ def sweep(
     pattern: str | PathLike[str],
     development: str | PathLike[str],
     output: str | PathLike[str],
-    config: str | PathLike[str] = 'model.json',
-    updates: int = 1000,
-    seed: int | None = None,
+    config: str | PathLike[str],
+    updates: int,
+    seed: int,
+    *,
     ce_only: bool = False,
     max_bytes: int = 8192,
     log_every: int = 100,
@@ -647,28 +670,38 @@ def sweep(
     eval_data: str | None = None,
     eval_every: int | None = None,
     eval_max_bytes: int = 8192,
+    save_every: int = 500,
 ) -> dict[str, Any]:
     """Run each model and seed pair in JSON product order."""
-    validation.training_options(seed, sample_seed, updates, log_every)
-    validation.positive(max_bytes, 'max-bytes')
-    validation.monitoring(
-        sample_every, sample_prompt, sample_bytes, eval_data, eval_every, eval_max_bytes
+    monitor = MonitorOptions(
+        sample_every=sample_every,
+        sample_prompt=sample_prompt,
+        sample_seed=sample_seed,
+        sample_bytes=sample_bytes,
+        eval_data=eval_data,
+        eval_every=eval_every,
+        eval_max_bytes=eval_max_bytes,
     )
-    from tmt.benchmark import evaluate
+    validation.training_options(seed, updates, log_every)
+    validation.positive(max_bytes, 'max-bytes')
+    validation.positive(save_every, 'save-every')
+    validation.monitoring(**dataclasses.asdict(monitor))
+    from .benchmark import evaluate
 
     settings = load_config(config)
-    with open(grid_path) as file:
-        grid = json.load(file)
+    grid = read_json(grid_path)
     validation.sweep_grid(grid, settings)
     keys = list(grid)
-    _input_files(pattern)
+    ByteFiles(pattern)
     if eval_data is not None:
-        list(documents(eval_data, eval_max_bytes))
+        validation.evaluation_targets(documents(eval_data, eval_max_bytes))
     development_data = list(documents(development, max_bytes))
+    validation.evaluation_targets(development_data)
     output_path = Path(output)
     if output_path.exists() and any(output_path.iterdir()):
         raise FileExistsError(
-            f'sweep output folder {output_path} is not empty; choose a new output folder'
+            f'sweep output folder {output_path} is not empty; '
+            'choose a new output folder'
         )
     output_path.mkdir(parents=True, exist_ok=True)
     results_path = output_path / 'results.jsonl'
@@ -685,25 +718,11 @@ def sweep(
         development_glob=development,
         development_max_bytes=max_bytes,
         log_every=log_every,
-        sample_every=sample_every,
-        sample_prompt=sample_prompt,
-        sample_seed=sample_seed,
-        sample_bytes=sample_bytes,
-        eval_data=eval_data,
-        eval_every=eval_every,
-        eval_max_bytes=eval_max_bytes,
+        save_every=save_every,
         started_at=datetime.now(timezone.utc).isoformat(),
+        **dataclasses.asdict(monitor),
     )
     write_json(sweep_manifest, record)
-    monitor = MonitorOptions(
-        sample_every=sample_every,
-        sample_prompt=sample_prompt,
-        sample_seed=sample_seed,
-        sample_bytes=sample_bytes,
-        eval_data=eval_data,
-        eval_every=eval_every,
-        eval_max_bytes=eval_max_bytes,
-    )
     try:
         for index, values in enumerate(
             itertools.product(*(grid[key] for key in keys)), 1
@@ -717,6 +736,7 @@ def sweep(
                 updates,
                 ce_only,
                 log_every,
+                save_every,
                 monitor,
                 development_data,
                 evaluate,

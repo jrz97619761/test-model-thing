@@ -37,6 +37,7 @@ def _gradient_summary(array):
 
 def capture_rtu_baseline(config, seed, steps, output_indices, state_rows):
     import mlx.core as mx
+
     from tmt.model import Model
 
     random.seed(seed)
@@ -46,9 +47,9 @@ def capture_rtu_baseline(config, seed, steps, output_indices, state_rows):
 
     updates = []
     captured_gradients = []
-    original_updategrads = model.updategrads
+    original_update_gradients = model.update_gradients
 
-    def capture_updategrads(grads):
+    def capture_update_gradients(grads):
         gradients = {
             f'blocks.{index}.decay': _array_values(block_grads['decay'])
             for index, block_grads in enumerate(grads['blocks'])
@@ -58,10 +59,10 @@ def capture_rtu_baseline(config, seed, steps, output_indices, state_rows):
         gradients['encoder.embed.weight'] = _gradient_summary(encoder_gradient)
         gradients['decoder.stop.bias'] = _array_values(grads['decoder']['stop']['bias'])
         captured_gradients.append(gradients)
-        original_updategrads(grads)
+        original_update_gradients(grads)
         mx.eval(model.parameters(), model.optimizer.state)
 
-    model.updategrads = capture_updategrads
+    model.update_gradients = capture_update_gradients
 
     for step in steps:
         record = {'input': step['input'], 'target': step['target'], 'end': step['end']}
@@ -261,6 +262,7 @@ def test_loss(loss_case, target, end, ce_only):
 
 def test_rtu_gradients(monkeypatch):
     import mlx.core as mx
+
     from tmt.config import load_config
     from tmt.model import Model
 
@@ -280,7 +282,7 @@ def test_rtu_gradients(monkeypatch):
         )
         mx.eval(*captured[-1].values())
 
-    monkeypatch.setattr(model, 'updategrads', capture)
+    monkeypatch.setattr(model, 'update_gradients', capture)
     model.train_step(65, 66, False, True)
     layer = model.blocks[0]
     previous_state = mx.array(layer.states)

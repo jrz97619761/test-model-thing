@@ -1,3 +1,7 @@
+"""Byte-step block contract, the RTU block, and the block registry."""
+
+from __future__ import annotations
+
 import math
 from typing import Any, Literal
 
@@ -6,7 +10,6 @@ import mlx.nn as nn
 from mlx.utils import tree_flatten
 
 from . import validation
-
 
 type FeatureSource = Literal['final-output', 'recurrent-state']
 type TemporalGradient = Literal['one-step-autodiff', 'rtu-v1']
@@ -38,25 +41,24 @@ class Block(nn.Module):
     def feature_source(self) -> FeatureSource:
         return 'final-output'
 
-    def validate(self) -> None:
+    def validate(self) -> RuntimeSchema:
         trainable = dict(tree_flatten(self.trainable_parameters()))
         self._runtime_schema = validation.block_runtime_schema(self, trainable)
+        return self._runtime_schema
 
-    def _validate_values(
+    def check_runtime_values(
         self, values: dict[str, mx.array], fields: tuple[str, ...]
     ) -> None:
         schema = self._runtime_schema
         if schema is None:
-            self.validate()
-            schema = self._runtime_schema
-        assert schema is not None
+            schema = self.validate()
         validation.block_runtime_values(values, fields, schema)
 
     def validate_result(
         self, enc: mx.array, x: mx.array, state: dict[str, mx.array]
     ) -> None:
         validation.block_output(x, enc)
-        self._validate_values(state, self.state_fields)
+        self.check_runtime_values(state, self.state_fields)
 
     def reset(self) -> None:
         for name in self.state_fields + self.trace_fields:
@@ -87,7 +89,7 @@ class Block(nn.Module):
         return saved
 
     def restore_state(self, saved: dict[str, mx.array]) -> None:
-        self._validate_values(saved, self.state_fields + self.trace_fields)
+        self.check_runtime_values(saved, self.state_fields + self.trace_fields)
         for name, value in saved.items():
             setattr(self, name, value)
         self.eval_state()
@@ -97,13 +99,13 @@ class Block(nn.Module):
         state: dict[str, mx.array],
         traces: dict[str, mx.array] | None = None,
     ) -> None:
-        self._validate_values(state, self.state_fields)
+        self.check_runtime_values(state, self.state_fields)
         validation.require(
             traces is None or isinstance(traces, dict),
             'block trace update must be a dictionary',
         )
         if traces:
-            self._validate_values(traces, self.trace_fields)
+            self.check_runtime_values(traces, self.trace_fields)
         for name, value in {**state, **(traces or {})}.items():
             setattr(self, name, mx.stop_gradient(value))
 
@@ -113,7 +115,7 @@ class Block(nn.Module):
         )
 
 
-class Layer(Block):
+class RTUBlock(Block):
     @property
     def state_fields(self) -> tuple[str, ...]:
         return ('states',)
@@ -177,4 +179,4 @@ class Layer(Block):
         return self.states
 
 
-BLOCKS = {'rtu': Layer}
+BLOCKS = {'rtu': RTUBlock}

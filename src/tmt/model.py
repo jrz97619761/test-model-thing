@@ -1,10 +1,14 @@
+"""Byte encoder, decoder, block stack, objective loss, and optimizer updates."""
+
+from __future__ import annotations
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as opt
 from mlx.utils import tree_flatten
 
+from . import validation
 from .blocks import BLOCKS, Block
-from .validation import block_name, matches_array, matches_arrays, require
 
 
 class Encoder(nn.Module):
@@ -38,22 +42,21 @@ class Model(nn.Module):
         block: str,
     ):
         super().__init__()
-        block_name(block)
+        validation.block_name(block)
         self.dim = dim
-        self.layers = layers
         self.temp = temp
 
         self.encoder = Encoder(dim)
         self.decoder = Decoder(dim)
 
         self.blocks = [BLOCKS[block](dim, spread) for _ in range(layers)]
-        for layer in self.blocks:
-            require(
-                isinstance(layer, Block), 'block factories must return a Block module'
+        for item in self.blocks:
+            validation.require(
+                isinstance(item, Block), 'block factories must return a Block module'
             )
-            layer.validate()
+            item.validate()
 
-        def lrfn(step: mx.array):
+        def learning_rate(step: mx.array):
             progress = mx.clip(
                 (step.astype(mx.float32) + 1.0 - float(bound[0]))
                 / float(bound[1] - bound[0]),
@@ -62,7 +65,7 @@ class Model(nn.Module):
             )
             return rate * (1.0 - 0.9 * progress)
 
-        self.optimizer = opt.AdamW(learning_rate=lrfn)
+        self.optimizer = opt.AdamW(learning_rate=learning_rate)
         self.compiled = None
 
     def sample(self, output: mx.array, key: mx.array | None = None):
@@ -73,28 +76,31 @@ class Model(nn.Module):
         return mx.random.categorical(output / temp, key=key)
 
     def step(
-        self, c: mx.array, dummies: list[mx.array] | None = None, frozen: bool = False
+        self,
+        byte: mx.array,
+        dummies: list[mx.array] | None = None,
+        frozen: bool = False,
     ):
         if dummies is None:
-            dummies = [layer.probe() for layer in self.blocks]
+            dummies = [block.probe() for block in self.blocks]
 
-        enc = self.encoder(c)
+        enc = self.encoder(byte)
         x = enc
 
         states, auxiliary = [], []
 
-        for i, layer in enumerate(self.blocks):
-            x, state, aux = layer(enc, x, dummies[i])
-            layer.validate_result(enc, x, state)
+        for i, block in enumerate(self.blocks):
+            x, state, aux = block(enc, x, dummies[i])
+            block.validate_result(enc, x, state)
             if frozen:
-                layer.commit_state(state)
+                block.commit_state(state)
 
             states.append(state)
             auxiliary.append(aux)
 
         return (x, states, auxiliary), self.decoder(x)
 
-    def updategrads(self, grads):
+    def update_gradients(self, grads):
         if self.compiled is None:
             self.optimizer.update(self, grads)
             mx.eval(self.parameters(), self.optimizer.state)
@@ -115,7 +121,7 @@ class Model(nn.Module):
         x: mx.array,
         output: mx.array,
         stop: mx.array,
-        nextb: int | None,
+        target: int | None,
         end: bool,
         ce_only: bool = False,
         components: dict | None = None,
@@ -127,24 +133,25 @@ class Model(nn.Module):
         if not ce_only:
             loss = mx.maximum(0.0, 1.0 - mx.sqrt(mx.var(x) + 1e-4))
             terms['variance'] = loss
-            if nextb is not None:
-                n = mx.array(nextb)
-                tgt = mx.stop_gradient(self.encoder(n))
+            if target is not None:
+                n = mx.array(target)
+                target_embedding = mx.stop_gradient(self.encoder(n))
 
-                terms['latent_prediction'] = mx.mean(mx.square(x - tgt))
+                terms['latent_prediction'] = mx.mean(mx.square(x - target_embedding))
                 terms['cross_entropy'] = -output[n] + mx.logsumexp(output)
                 terms['stop'] = mx.mean(
                     mx.square(stop - mx.array([1.0 if end else 0.0]))
                 )
                 loss = loss + terms['latent_prediction']
+                # Keep this order: seeded tests pin the float32 loss bits.
                 loss = loss - output[n] + mx.logsumexp(output)
                 loss = loss + terms['stop']
         else:
-            if nextb is not None:
-                loss = -output[mx.array(nextb)] + mx.logsumexp(output)
+            if target is not None:
+                loss = -output[mx.array(target)] + mx.logsumexp(output)
             else:
-                loss = 0.0
-            terms['cross_entropy'] = mx.array(loss)
+                loss = mx.array(0.0)
+            terms['cross_entropy'] = loss
 
         if components is not None:
             components.update(terms)
@@ -153,52 +160,54 @@ class Model(nn.Module):
 
     def train_step(
         self,
-        currb: int,
-        nextb: int | None,
+        current: int,
+        target: int | None,
         end: bool,
         ce_only: bool = False,
         metrics: dict | None = None,
     ) -> tuple[mx.array, mx.array, mx.array]:
-        c = mx.array(currb)
-        p = self.trainable_parameters()
+        byte = mx.array(current)
+        params = self.trainable_parameters()
 
-        def fwd(params, dummies: list[mx.array]):
+        def forward(params, dummies: list[mx.array]):
             self.update(params)
-            (x, states, auxiliary), (output, stop) = self.step(c, dummies)
+            (x, states, auxiliary), (output, stop) = self.step(byte, dummies)
             components = {}
-            loss = self.loss(x, output, stop, nextb, end, ce_only, components)
+            loss = self.loss(x, output, stop, target, end, ce_only, components)
             return loss, (states, auxiliary, output, stop, components)
 
-        (loss, (states, auxiliary, output, stop, components)), (grads, dlds_s) = (
-            mx.value_and_grad(fwd, argnums=(0, 1))(
-                p, [layer.probe() for layer in self.blocks]
+        (loss, (states, auxiliary, output, stop, components)), (grads, probe_grads) = (
+            mx.value_and_grad(forward, argnums=(0, 1))(
+                params, [block.probe() for block in self.blocks]
             )
         )
 
-        self.update(p)
+        self.update(params)
 
-        block_grads = grads.get('blocks', [{} for _ in self.blocks])
-        for i, layer in enumerate(self.blocks):
-            local = block_grads[i]
+        for i, block in enumerate(self.blocks):
+            local = grads['blocks'][i] if 'blocks' in grads else {}
             templates = dict(tree_flatten(local))
-            adjusted, encoder_addition, traces = layer.adjust_gradients(
-                c, states[i], auxiliary[i], dlds_s[i], local
+            adjusted, encoder_addition, traces = block.adjust_gradients(
+                byte, states[i], auxiliary[i], probe_grads[i], local
             )
             actual = dict(tree_flatten(adjusted))
-            require(
-                matches_arrays(actual, templates),
+            validation.require(
+                validation.matches_arrays(actual, templates),
                 'block gradient hook must retain local gradient names, '
                 'shapes, and dtypes',
             )
-            block_grads[i] = adjusted
+            if 'blocks' in grads:
+                grads['blocks'][i] = adjusted
             if encoder_addition is not None:
                 embedding = grads['encoder']['embed']['weight']
-                require(
-                    matches_array(encoder_addition, embedding.shape, embedding.dtype),
+                validation.require(
+                    validation.matches_array(
+                        encoder_addition, embedding.shape, embedding.dtype
+                    ),
                     'block encoder gradient must retain embedding shape and dtype',
                 )
                 grads['encoder']['embed']['weight'] += encoder_addition
-            layer.commit_state(states[i], traces)
+            block.commit_state(states[i], traces)
 
         self.eval_state()
 
@@ -207,48 +216,46 @@ class Model(nn.Module):
             metrics.update(
                 {name: float(value.item()) for name, value in components.items()}
             )
-        self.updategrads(grads)
+        self.update_gradients(grads)
         return output, stop, loss
 
     def __call__(
-        self, currb: int, nextb: int | None, end: bool, frozen: bool, ce_only: bool
+        self, current: int, target: int | None, end: bool, frozen: bool, ce_only: bool
     ):
-        c = mx.array(currb)
-
         if frozen:
-            _, (output, stop) = self.step(c, frozen=True)
+            _, (output, stop) = self.step(mx.array(current), frozen=True)
 
             self.eval_state()
             return self.sample(output).item(), stop.item()
 
-        output, stop, _ = self.train_step(currb, nextb, end, ce_only)
+        output, stop, _ = self.train_step(current, target, end, ce_only)
         return self.sample(output).item(), stop.item()
 
     def reset(self):
-        for layer in self.blocks:
-            layer.reset()
+        for block in self.blocks:
+            block.reset()
         self.eval_state()
 
     def snapshot_state(self):
-        return [layer.snapshot_state() for layer in self.blocks]
+        return [block.snapshot_state() for block in self.blocks]
 
     def restore_state(self, snapshot):
-        require(
+        validation.require(
             len(snapshot) == len(self.blocks),
             'model state snapshot must contain every block',
         )
-        for layer, saved in zip(self.blocks, snapshot):
-            layer._validate_values(saved, layer.state_fields + layer.trace_fields)
-        for layer, saved in zip(self.blocks, snapshot):
-            layer.restore_state(saved)
+        for block, saved in zip(self.blocks, snapshot):
+            block.check_runtime_values(saved, block.state_fields + block.trace_fields)
+        for block, saved in zip(self.blocks, snapshot):
+            block.restore_state(saved)
 
     def eval_state(self):
-        for layer in self.blocks:
-            layer.eval_state()
+        for block in self.blocks:
+            block.eval_state()
 
     @property
     def temporal_gradient(self):
-        return [layer.temporal_gradient for layer in self.blocks]
+        return [block.temporal_gradient for block in self.blocks]
 
     def count(self) -> int:
         """Count currently trainable tensor elements, before a full-model freeze."""

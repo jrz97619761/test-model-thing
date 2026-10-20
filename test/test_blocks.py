@@ -1,10 +1,9 @@
 import mlx.core as mx
 import mlx.nn as nn
+import pytest
 from mlx.utils import tree_flatten
 
-import pytest
-
-from tmt.blocks import BLOCKS, Block, Layer
+from tmt.blocks import BLOCKS, Block, RTUBlock
 from tmt.model import Model
 
 
@@ -75,7 +74,7 @@ def make_model(tiny_settings):
     [
         (Block, ((), (), 'one-step-autodiff', 'final-output')),
         (
-            Layer,
+            RTUBlock,
             (('states',), ('decaytrace', 'embedtrace'), 'rtu-v1', 'recurrent-state'),
         ),
         (
@@ -115,7 +114,8 @@ def test_block_contract_properties(block_type, expected):
     ],
 )
 def test_invalid_block_labels(monkeypatch, tiny_settings, field, value):
-    invalid = type('InvalidLabel', (MatrixCache,), {field: property(lambda self: value)})
+    label = property(lambda self: value)
+    invalid = type('InvalidLabel', (MatrixCache,), {field: label})
     monkeypatch.setitem(BLOCKS, 'invalid-test', invalid)
     with pytest.raises(ValueError, match=f'block {field} must be one of'):
         Model(**{**tiny_settings, 'block': 'invalid-test'})
@@ -123,22 +123,22 @@ def test_invalid_block_labels(monkeypatch, tiny_settings, field, value):
 
 @pytest.mark.parametrize('operation', ['commit', 'restore', 'result'])
 def test_layer_value_validation_is_lazy(operation):
-    layer = Layer(4, 4)
+    layer = RTUBlock(4, 4)
     assert layer._runtime_schema is None
 
-    if operation == 'commit':
-        check = lambda: layer.commit_state({'states': mx.zeros((2,))})
-    elif operation == 'restore':
-        saved = {
-            'states': mx.zeros((2,)),
-            'decaytrace': mx.zeros_like(layer.decaytrace),
-            'embedtrace': mx.zeros_like(layer.embedtrace),
-        }
-        check = lambda: layer.restore_state(saved)
-    else:
-        enc = mx.zeros((4,))
-        output = mx.zeros((4,))
-        check = lambda: layer.validate_result(enc, output, {'states': mx.zeros((2,))})
+    def check():
+        if operation == 'commit':
+            layer.commit_state({'states': mx.zeros((2,))})
+        elif operation == 'restore':
+            saved = {
+                'states': mx.zeros((2,)),
+                'decaytrace': mx.zeros_like(layer.decaytrace),
+                'embedtrace': mx.zeros_like(layer.embedtrace),
+            }
+            layer.restore_state(saved)
+        else:
+            enc, output = mx.zeros((4,)), mx.zeros((4,))
+            layer.validate_result(enc, output, {'states': mx.zeros((2,))})
 
     with pytest.raises(ValueError, match='retain shape'):
         check()
@@ -161,13 +161,13 @@ def test_training_updates_parameters_and_optimizer(
     assert model.count() == parameter_count - buffers
 
     gradients = []
-    update = model.updategrads
+    update = model.update_gradients
 
     def capture(grads):
         gradients.append(dict(tree_flatten(grads)))
         update(grads)
 
-    monkeypatch.setattr(model, 'updategrads', capture)
+    monkeypatch.setattr(model, 'update_gradients', capture)
     for current, target in [(65, 66), (66, 67), (67, 68)]:
         output, _, loss = model.train_step(current, target, False)
         assert output.shape == (256,)
@@ -317,7 +317,7 @@ def test_training_sample_restores_state_and_rng(
 )
 def test_checkpoint_round_trip(block, convention, tmp_path, tiny_settings, snapshot):
     from tmt.benchmark import rollout
-    from tmt.checkpoint import load_model, save_checkpoint
+    from tmt.checkpoint import load_checkpoint, save_checkpoint
 
     settings = {**tiny_settings, 'layers': 2, 'block': block}
     model = Model(**settings)
@@ -327,7 +327,7 @@ def test_checkpoint_round_trip(block, convention, tmp_path, tiny_settings, snaps
 
     path = tmp_path / 'candidate.safetensors'
     save_checkpoint(path, model, settings)
-    loaded, resolved = load_model(path, 11)
+    loaded, resolved = load_checkpoint(path)
 
     assert resolved == settings, 'loaded settings differ from saved settings'
     assert loaded.dim == 4, 'restored model dimension differs'
@@ -418,7 +418,7 @@ def test_invalid_gradient_hooks(monkeypatch, forbid_call, fault, tiny_settings):
 
     monkeypatch.setitem(BLOCKS, 'invalid-test', Invalid)
     model = Model(**{**tiny_settings, 'block': 'invalid-test'})
-    monkeypatch.setattr(model, 'updategrads', forbid_call)
+    monkeypatch.setattr(model, 'update_gradients', forbid_call)
     message = {'encoder': 'block encoder gradient', 'trace': 'history'}.get(
         fault, 'block gradient hook'
     )

@@ -36,6 +36,7 @@ def forbid_call():
 def checkpoint(tmp_path, tiny_settings):
     """Save an untrained tiny checkpoint and return its parts."""
     import mlx.core as mx
+
     from tmt.checkpoint import new_model, save_checkpoint
 
     path = tmp_path / 'model.safetensors'
@@ -90,6 +91,9 @@ def manifest_fields():
         'started_at',
         'status',
         'last_checkpoint',
+        'error',
+        'optimizer_step',
+        'save_every',
         'sample',
         'evaluation',
         'trainable_parameters',

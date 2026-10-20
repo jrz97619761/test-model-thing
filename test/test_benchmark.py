@@ -1,3 +1,4 @@
+import json
 import math
 import subprocess
 import sys
@@ -200,7 +201,9 @@ def test_short_context(evaluation_model):
 
 
 def test_benchmark_run(checkpoint, tmp_path, capsys):
+    import mlx.core as mx
     from mlx.utils import tree_flatten
+
     from tmt.benchmark import BYTE_DOCUMENTS, CONTEXT_WINDOWS, mcc, run
 
     model = checkpoint.model
@@ -222,13 +225,20 @@ def test_benchmark_run(checkpoint, tmp_path, capsys):
     data.write_text(
         'src\t1\tx\talpha\nsrc\t0\tx\tbeta\nsrc\t0\tx\tgamma\nsrc\t1\tx\tdelta\n'
     )
+    mx.random.seed(5)
+    rng_before = mx.array(mx.random.state[0])
     result = run(str(checkpoint.path), 1, 0.5, str(data), model=model, seed=11)
+    assert mx.array_equal(mx.random.state[0], rng_before).item()
     output = capsys.readouterr().out
-    assert '(390 targets)' in output
-    assert '(104 targets)' in output
+    lines = output.splitlines()
+    assert lines[0].startswith('frozen BPB: ') and lines[0].endswith(', targets: 390')
+    assert lines[1].startswith('common BPB: ') and lines[1].endswith(', targets: 104')
+    assert lines[2].startswith('window 1: BPB ')
+    assert lines[-2].startswith('epoch 1/1 train: T+ ')
+    assert lines[-1].startswith('epoch 1/1 held: T+ ')
     assert set(result) == {'byte_scores', 'feature_source', 'epoch_scores'}
     assert result['feature_source'] == 'recurrent-state'
-    assert 'CoLA feature convention: recurrent-state' in output
+    assert 'CoLA feature source: recurrent-state' in lines
     for partition in ('train', 'held'):
         score = result['epoch_scores'][0][partition]
         assert sum(score[key] for key in ('tp', 'tn', 'fp', 'fn')) == 2
@@ -256,97 +266,132 @@ def test_benchmark_run(checkpoint, tmp_path, capsys):
     assert state() == before
 
 
-def test_benchmark_run_without_cola(checkpoint):
-    from tmt.benchmark import run
-
-    result = run(str(checkpoint.path), model=checkpoint.model, seed=11)
-    assert set(result) == {'byte_scores', 'epoch_scores'}
-    assert result['epoch_scores'] == []
-
-
-@pytest.mark.parametrize(
-    ('text', 'error'),
-    [
-        ('src\t1\tx', 'row 4 has 3 columns; expected 4'),
-        ('src\t1\tx\talpha\textra', 'row 4 has 5 columns; expected 4'),
-        ('src\t1\tx\talpha\t', 'row 4 has 5 columns; expected 4'),
-        ('\tsrc\t1\tx\talpha', 'row 4 has 5 columns; expected 4'),
-        ('src\t1\tx\t', 'row 4 has an empty sentence'),
-        ('src\t1\tx\t   ', 'row 4 has an empty sentence'),
-        (
-            'src\t2\tx\tgamma\nsrc\t2\tx\tdelta',
-            r'row 4 has invalid label .2.; expected 0 or 1',
-        ),
-        ('src\tno\tx\tgamma', r'row 4 has invalid label .no.; expected 0 or 1'),
-    ],
-    ids=[
-        'three-columns',
-        'five-columns',
-        'trailing-tab',
-        'leading-tab',
-        'empty-sentence',
-        'blank-sentence',
-        'label-2',
-        'label-no',
-    ],
-)
-def test_cola_rows_rejected_before_model_work(
-    tmp_path, monkeypatch, forbid_call, text, error
-):
-    from tmt.benchmark import run
-
-    data = tmp_path / 'cola.tsv'
-    data.write_text(
-        'src\t1\tx\talpha\n\nsrc\t0\tx\tbeta\n' + text + '\n', encoding='utf-8'
-    )
-    monkeypatch.setattr('tmt.checkpoint.load_checkpoint', forbid_call)
-    monkeypatch.setattr('tmt.benchmark.evaluate', forbid_call)
-    with pytest.raises(ValueError, match=f'CoLA TSV {error}'):
-        run('missing.safetensors', data=str(data), model=None, seed=11)
-
-
 def test_cola_preserves_sentence_bytes(tmp_path):
-    from tmt.benchmark import cola
+    from tmt.benchmark import load_cola
 
     data = tmp_path / 'cola.tsv'
     data.write_bytes('\r\n  \r\n\t1\t\t  café  \r\nsrc\t0\tx\tbeta'.encode('utf-8'))
-    assert cola(str(data)) == [('  café  '.encode('utf-8'), 1), (b'beta', 0)]
+    assert load_cola(str(data)) == [('  café  '.encode('utf-8'), 1), (b'beta', 0)]
+
+
+def test_benchmark_run_without_cola_writes_output(
+    checkpoint, tmp_path, monkeypatch, forbid_call
+):
+    from tmt.benchmark import run
+
+    output = tmp_path / 'benchmark.json'
+    result = run(str(checkpoint.path), seed=11, output=str(output))
+    assert set(result) == {'byte_scores', 'epoch_scores'}
+    assert result['epoch_scores'] == []
+    record = json.loads(output.read_text())
+    assert list(record) == [
+        'byte_scores', 'epoch_scores', 'checkpoint', 'optimizer_step', 'seed'
+    ]
+    assert {k: record[k] for k in result} == json.loads(json.dumps(result))
+    assert (record['checkpoint'], record['optimizer_step'], record['seed']) == (
+        str(checkpoint.path), 0, 11
+    )
+    monkeypatch.setattr('tmt.checkpoint.load_checkpoint', forbid_call)
+    missing = tmp_path / 'missing' / 'benchmark.json'
+    with pytest.raises(FileNotFoundError, match='output folder .*missing'):
+        run(str(checkpoint.path), seed=11, output=str(missing))
+
+
+VALID_ROWS = 'src\t1\tx\talpha\n\nsrc\t0\tx\tbeta\n'
+INVALID_RUN_INPUTS = {  # id: (run options, TSV text or None, error, message)
+    'split-negative': ({'split': -0.1}, None, ValueError, 'split must be between'),
+    'split-above-one': ({'split': 1.5}, None, ValueError, 'split must be between'),
+    'split-nan': ({'split': float('nan')}, None, ValueError, 'split must be between'),
+    'epochs-0': ({'epochs': 0}, VALID_ROWS, ValueError, 'epochs must be positive'),
+    'epochs-negative': (
+        {'epochs': -1},
+        VALID_ROWS,
+        ValueError,
+        'epochs must be positive',
+    ),
+    'missing-file': ({}, None, FileNotFoundError, 'cola.tsv'),
+    'one-row': ({}, 'src\t1\tx\talpha\n', ValueError, 'at least two valid'),
+    'three-columns': (
+        {},
+        VALID_ROWS + 'src\t1\tx\n',
+        ValueError,
+        'row 4 has 3 columns; expected 4',
+    ),
+    'five-columns': (
+        {},
+        VALID_ROWS + 'src\t1\tx\talpha\textra\n',
+        ValueError,
+        'row 4 has 5 columns; expected 4',
+    ),
+    'trailing-tab': (
+        {},
+        VALID_ROWS + 'src\t1\tx\talpha\t\n',
+        ValueError,
+        'row 4 has 5 columns; expected 4',
+    ),
+    'leading-tab': (
+        {},
+        VALID_ROWS + '\tsrc\t1\tx\talpha\n',
+        ValueError,
+        'row 4 has 5 columns; expected 4',
+    ),
+    'empty-sentence': (
+        {},
+        VALID_ROWS + 'src\t1\tx\t\n',
+        ValueError,
+        'row 4 has an empty sentence',
+    ),
+    'blank-sentence': (
+        {},
+        VALID_ROWS + 'src\t1\tx\t   \n',
+        ValueError,
+        'row 4 has an empty sentence',
+    ),
+    'label-2': (
+        {},
+        VALID_ROWS + 'src\t2\tx\tgamma\nsrc\t2\tx\tdelta\n',
+        ValueError,
+        r'row 4 has invalid label .2.; expected 0 or 1',
+    ),
+    'label-no': (
+        {},
+        VALID_ROWS + 'src\tno\tx\tgamma\n',
+        ValueError,
+        r'row 4 has invalid label .no.; expected 0 or 1',
+    ),
+}
 
 
 @pytest.mark.parametrize(
-    ('epochs', 'rows', 'error', 'message'),
-    [
-        (0, None, ValueError, 'epochs must be positive with cola-data'),
-        (-1, None, ValueError, 'epochs must be positive with cola-data'),
-        (1, None, FileNotFoundError, None),
-        (
-            1,
-            'src\t1\tx\talpha',
-            FileNotFoundError,
-            'at least two valid four-column rows',
-        ),
-    ],
-    ids=['epochs-0', 'epochs-negative', 'missing-file', 'one-row'],
+    ('options', 'text', 'error', 'message'),
+    INVALID_RUN_INPUTS.values(),
+    ids=list(INVALID_RUN_INPUTS),
 )
-def test_run_rejects_bad_cola_inputs(
-    tmp_path, monkeypatch, forbid_call, epochs, rows, error, message
+def test_run_rejects_bad_inputs_before_model_work(
+    tmp_path, monkeypatch, forbid_call, options, text, error, message
 ):
     from tmt.benchmark import run
 
     data = tmp_path / 'cola.tsv'
-    if rows:
-        data.write_text(rows + '\n', encoding='utf-8')
+    if text is not None:
+        data.write_text(text, encoding='utf-8')
     monkeypatch.setattr('tmt.checkpoint.load_checkpoint', forbid_call)
     monkeypatch.setattr('tmt.benchmark.evaluate', forbid_call)
     model = SimpleNamespace(freeze=forbid_call)
+    has_cola = 'split' not in options
     with pytest.raises(error, match=message):
-        run('missing.safetensors', epochs, data=str(data), model=model, seed=11)
+        run(
+            'missing.safetensors',
+            data=str(data) if has_cola else None,
+            model=model,
+            seed=11,
+            **options,
+        )
 
 
 @pytest.mark.parametrize(
     ('args', 'code', 'error'),
     [
-        (['--help'], 0, None),
         (
             [
                 'missing.safetensors', '--cola-data', 'cola.tsv', '--epochs', '1',
@@ -357,7 +402,7 @@ def test_run_rejects_bad_cola_inputs(
         ),
         (['missing.safetensors', '--seed', '-1'], 1, 'seed must be between'),
     ],
-    ids=['help', 'bad-row', 'invalid-seed'],
+    ids=['bad-row', 'invalid-seed'],
 )
 def test_benchmark_entry_points(tmp_path, args, code, error):
     (tmp_path / 'cola.tsv').write_text(
@@ -379,8 +424,31 @@ def test_benchmark_entry_points(tmp_path, args, code, error):
     assert returncode == code, stderr
     assert 'Traceback' not in stderr
     assert [path.name for path in tmp_path.iterdir()] == ['cola.tsv']
-    if error is None:
-        assert stdout.startswith('## benchmark')
-    else:
-        assert error in stderr
-        assert stdout == ''
+    assert error in stderr
+    assert stdout == ''
+
+
+def test_module_alias_reports_interrupt(tmp_path):
+    import signal
+
+    script = """
+import runpy, sys
+import tmt.checkpoint
+
+def interrupt(*args, **kwargs):
+    raise KeyboardInterrupt
+
+tmt.checkpoint.load_checkpoint = interrupt
+sys.argv = ['tmt.benchmark', 'missing.safetensors', '--seed', '11']
+runpy.run_module('tmt.benchmark', run_name='__main__', alter_sys=True)
+"""
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == -signal.SIGINT, result.stderr
+    assert 'Traceback' not in result.stderr
+    assert result.stderr.splitlines()[-1] == 'tmt: interrupted'

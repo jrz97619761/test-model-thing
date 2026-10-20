@@ -30,3 +30,10 @@ class ByteFiles:
                 data = data[:remaining]
                 remaining -= len(data)
             yield data
+
+
+def documents(
+    pattern: str | PathLike[str], max_bytes: int | None = None
+) -> Iterator[bytes]:
+    """Yield sorted raw files with an optional prefix across all file bytes."""
+    yield from ByteFiles(pattern).documents(max_bytes)

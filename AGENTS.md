@@ -16,7 +16,7 @@ All package paths below are relative to `src/tmt/`.
 | `validation.py` | Input checks, checkpoint metadata and tensor checks, and block contracts |
 | `checkpoint.py` | Seeded model creation and Safetensors save/load |
 | `data.py` | `ByteFiles`, file selection, readability checks, and raw-byte document reads |
-| `runtime.py` | `TrainingRun`, train loops, samples, checkpoint evaluation, generation, and sweeps |
+| `runtime.py` | `TrainingRun`, train loops, samples, checkpoint evaluation and inspection, generation, and sweeps |
 | `records.py` | Typed manifest records, JSON output, and JSONL output |
 | `benchmark.py` | Frozen byte evaluation, fixed byte fixtures, and optional CoLA classification |
 | `cli.py`, `__main__.py` | Argument parsing, command dispatch, and `python -m tmt` |
@@ -101,6 +101,7 @@ Do not regenerate the baseline only to hide a regression. Review any intentional
 `benchmark.py` defines `BYTE_FIXTURE`, `BYTE_DOCUMENTS`, and `CONTEXT_WINDOWS` for the fixed byte suite.
 CoLA uses a separate classifier head while the model weights stay frozen.
 The Python result uses `byte_scores` and `epoch_scores`, plus `feature_source` when CoLA runs.
+The `--output` file adds `checkpoint`, `optimizer_step`, and `seed` after the result fields. The `evaluate` result ends with `checkpoint` and `optimizer_step`.
 The CoLA MCC values use a scale of 100.
 
 Keep objective loss, frozen bits per byte, and CoLA MCC distinct in reports.
@@ -120,12 +121,14 @@ The loader requires the current metadata fields and exact tensor names, shapes, 
 
 Resume restores checkpoint settings and tensors, then starts a new data pass.
 It does not restore the previous file cursor or RNG state.
+Resume appends to `loss.jsonl`, `samples.jsonl`, and `evaluation.jsonl`, and renames the earlier `run.json` to `run.replaced-<UTC timestamp>.json`. A fresh run starts empty files.
+The CLI refuses a fresh run at an existing explicit checkpoint path.
 The trainer resets recurrent state and traces for each nonempty document.
 File order uses a separate seeded Python RNG.
 
-`TrainingRun.after_update()` controls loss reports, terminal-byte consumption, samples, evaluation, and periodic saves.
-The trainer also saves at normal completion.
-On the main thread, its SIGINT handler records an interrupt request.
+`TrainingRun.after_update()` controls loss reports, terminal-byte consumption, samples, evaluation, and periodic saves at each `save_every` interval.
+The trainer also saves at normal completion. It rewrites `run.json` after each save, and records `error` when an exception fails the run.
+On the main thread, its SIGINT and SIGTERM handler records an interrupt request.
 The trainer checks the request at complete update boundaries, after the update actions.
 It saves before it raises `KeyboardInterrupt` for that request.
 Worker threads do not install that handler.

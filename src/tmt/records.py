@@ -6,7 +6,6 @@ import json
 from os import PathLike
 from typing import Any, Literal, TypedDict
 
-
 type RunStatus = Literal['running', 'complete', 'failed', 'interrupted']
 
 
@@ -19,15 +18,18 @@ class RunManifest(TypedDict):
     data_files: list[str]
     updates: int
     log_every: int
+    save_every: int
     objective: str
     completed_updates: int
     resume: bool
     initial_optimizer_step: int
+    optimizer_step: int
     sample: dict[str, Any] | None
     evaluation: dict[str, Any] | None
     started_at: str | None
     status: RunStatus
     last_checkpoint: str | None
+    error: dict[str, str] | None
 
 
 class SweepManifest(TypedDict):
@@ -40,6 +42,7 @@ class SweepManifest(TypedDict):
     development_glob: str
     development_max_bytes: int
     log_every: int
+    save_every: int
     sample_every: int | None
     sample_prompt: str
     sample_seed: int
@@ -65,14 +68,17 @@ def build_run_manifest(
     updates: int,
     log_every: int,
     objective: str,
+    save_every: int = 500,
     completed_updates: int = 0,
     resume: bool = False,
     initial_optimizer_step: int = 0,
+    optimizer_step: int = 0,
     sample: dict[str, Any] | None = None,
     evaluation: dict[str, Any] | None = None,
     started_at: str | None = None,
     status: RunStatus = 'running',
     last_checkpoint: str | None = None,
+    error: dict[str, str] | None = None,
 ) -> RunManifest:
     """Build a run manifest in the stable JSON field order."""
     return {
@@ -84,15 +90,18 @@ def build_run_manifest(
         'data_files': data_files,
         'updates': updates,
         'log_every': log_every,
+        'save_every': save_every,
         'objective': objective,
         'completed_updates': completed_updates,
         'resume': resume,
         'initial_optimizer_step': initial_optimizer_step,
+        'optimizer_step': optimizer_step,
         'sample': sample,
         'evaluation': evaluation,
         'started_at': started_at,
         'status': status,
         'last_checkpoint': last_checkpoint,
+        'error': error,
     }
 
 
@@ -107,6 +116,7 @@ def build_sweep_manifest(
     development_glob: str,
     development_max_bytes: int,
     log_every: int,
+    save_every: int,
     sample_every: int | None,
     sample_prompt: str,
     sample_seed: int,
@@ -131,6 +141,7 @@ def build_sweep_manifest(
         'development_glob': development_glob,
         'development_max_bytes': development_max_bytes,
         'log_every': log_every,
+        'save_every': save_every,
         'sample_every': sample_every,
         'sample_prompt': sample_prompt,
         'sample_seed': sample_seed,
@@ -144,6 +155,15 @@ def build_sweep_manifest(
         'current_run': current_run,
         'error': error,
     }
+
+
+def read_json(path: str | PathLike[str]) -> Any:
+    """Read one JSON value and name the file in a syntax error."""
+    with open(path) as file:
+        try:
+            return json.load(file)
+        except json.JSONDecodeError as error:
+            raise ValueError(f'invalid JSON in {path}: {error}') from error
 
 
 def write_json(

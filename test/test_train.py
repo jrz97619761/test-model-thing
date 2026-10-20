@@ -42,8 +42,8 @@ INVALID_GRIDS = {
 def test_train_visits_byte_pairs_and_resumes(
     monkeypatch, capsys, tiny_settings, tmp_path, snapshot
 ):
-    from tmt.runtime import train
     from tmt.model import Model
+    from tmt.runtime import train
 
     data = tmp_path / 'train.bin'
     data.write_bytes(bytes((0, 255, 65, 10)))
@@ -82,8 +82,66 @@ def test_train_visits_byte_pairs_and_resumes(
     assert snapshot(first) == snapshot(second)
 
 
+def test_resume_keeps_earlier_manifest_and_rows(tiny_settings, tmp_path, jsonl):
+    from tmt.runtime import train
+
+    data = tmp_path / 'train.bin'
+    data.write_bytes(b'abcdef')
+    checkpoint = tmp_path / 'run' / 'model.safetensors'
+    folder = checkpoint.parent / 'manifest'
+    train(tiny_settings, checkpoint, str(data), 3, 11, log_every=2)
+    first = json.loads((folder / 'run.json').read_text())
+    train(None, checkpoint, str(data), 2, 11, resume=True, log_every=2)
+    train(None, checkpoint, str(data), 1, 11, resume=True, log_every=2)
+
+    archives = sorted(folder.glob('run.replaced-*.json'))
+    assert len(archives) == 2
+    assert json.loads(archives[0].read_text()) == first
+    assert json.loads(archives[1].read_text())['optimizer_step'] == 5
+    current = json.loads((folder / 'run.json').read_text())
+    assert (current['initial_optimizer_step'], current['optimizer_step']) == (5, 6)
+    rows = jsonl(folder / 'loss.jsonl')
+    assert [r['optimizer_step'] for r in rows] == [2, 3, 5, 6]
+    assert [r['completed_updates'] for r in rows] == [2, 3, 2, 1]
+
+
+def test_save_every_sets_interval_and_updates_manifest(
+    monkeypatch, capsys, tiny_settings, tmp_path
+):
+    import inspect
+
+    from tmt.runtime import TrainingRun, train
+
+    data = tmp_path / 'train.bin'
+    data.write_bytes(b'abcdefgh')
+    checkpoint = tmp_path / 'run' / 'model.safetensors'
+    save, saved = TrainingRun.save_checkpoint, []
+
+    def record(run):
+        save(run)
+        manifest = json.loads(run.manifest.read_text())
+        fields = ('status', 'completed_updates', 'optimizer_step', 'save_every')
+        saved.append(tuple(manifest[name] for name in fields))
+
+    monkeypatch.setattr(TrainingRun, 'save_checkpoint', record)
+    train(tiny_settings, checkpoint, str(data), 5, 11, save_every=2)
+    assert saved == [
+        ('running', 2, 2, 2),
+        ('running', 4, 4, 2),
+        ('running', 5, 5, 2),
+    ]
+    lines = capsys.readouterr().out.splitlines()
+    assert [line for line in lines if line.startswith('saved checkpoint:')] == [
+        f'saved checkpoint: {checkpoint}, updates: {updates}, step: {updates}'
+        for updates in (2, 4, 5)
+    ]
+    assert lines[-1] == f'updates: 5, step: 5, checkpoint: {checkpoint}'
+    assert inspect.signature(train).parameters['save_every'].default == 500
+
+
 def test_resume_file_order_uses_seed(tiny_settings, tmp_path):
     import random
+
     from tmt.checkpoint import new_model, save_checkpoint
     from tmt.runtime import MonitorOptions, TrainingRun
 
@@ -116,6 +174,7 @@ def test_sigint_saves_complete_update(
     monkeypatch, tiny_settings, tmp_path, snapshot, jsonl, resume, stage
 ):
     import mlx.core as mx
+
     from tmt.checkpoint import load_checkpoint
     from tmt.model import Model
     from tmt.runtime import TrainingRun, train
@@ -130,7 +189,7 @@ def test_sigint_saves_complete_update(
     settings = None if resume else tiny_settings
     expected = train(settings, reference, str(data), 1, 11, resume=resume)
     targets = {
-        'update': (Model, 'updategrads'),
+        'update': (Model, 'update_gradients'),
         'terminal': (TrainingRun, 'consume_terminal_byte'),
         'sample': (TrainingRun, 'report_sample'),
         'evaluation': (TrainingRun, 'report_evaluation'),
@@ -144,7 +203,7 @@ def test_sigint_saves_complete_update(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(owner, name, interrupt)
-    handler = signal.getsignal(signal.SIGINT)
+    handlers = signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)
     with pytest.raises(KeyboardInterrupt):
         train(
             settings, checkpoint, str(data), 1 if stage == 'save' else 3, 11,
@@ -152,20 +211,23 @@ def test_sigint_saves_complete_update(
             sample_bytes=2, eval_data=str(data) if stage == 'evaluation' else None,
             eval_every=1 if stage == 'evaluation' else None,
         )
-    assert signal.getsignal(signal.SIGINT) == handler
-    loaded, _ = load_checkpoint(checkpoint, 99)
+    assert signal.getsignal(signal.SIGINT) == handlers[0]
+    assert signal.getsignal(signal.SIGTERM) == handlers[1]
+    loaded, _ = load_checkpoint(checkpoint)
     assert snapshot(loaded) == snapshot(expected)
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
     assert record['status'] == 'interrupted'
     assert record['completed_updates'] == 1
     assert record['last_checkpoint'] == str(checkpoint.resolve())
-    (row,) = jsonl(checkpoint.parent / 'manifest/loss.jsonl')
+    *earlier, row = jsonl(checkpoint.parent / 'manifest/loss.jsonl')
+    assert [r['optimizer_step'] for r in earlier] == ([2] if resume else [])
     assert row['optimizer_step'] == (3 if resume else 1)
     assert row['completed_updates'] == 1
 
 
 def test_train_in_worker_thread(tiny_settings, tmp_path):
     from concurrent.futures import ThreadPoolExecutor
+
     from tmt.runtime import train
 
     data = tmp_path / 'train.bin'
@@ -180,8 +242,8 @@ def test_train_in_worker_thread(tiny_settings, tmp_path):
 
 
 def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
-    from tmt.runtime import train
     from tmt.model import Model
+    from tmt.runtime import train
 
     records, calls, paths = [], [], {}
     train_step, original_dump = Model.train_step, json.dump
@@ -203,9 +265,9 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
     with monkeypatch.context() as patches:
         patches.setattr('json.dump', capture)
         patches.setattr(Model, 'train_step', record_train)
-        trained = train(tiny_settings, checkpoint, 'data/*.bin', 4, 11, False)
+        trained = train(tiny_settings, checkpoint, 'data/*.bin', 4, 11)
 
-    assert len(records) == 2
+    assert len(records) == 3
     assert set(records[0]) == manifest_fields
     example_path = Path(__file__).resolve().parents[1] / 'examples' / 'run.example.json'
     example = json.loads(example_path.read_text())
@@ -227,19 +289,26 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
         assert record['data_files'] == [path for path, _ in calls[:3]]
     files = records[0]['data_files']
     assert calls == [(path, False) for path in files + files[:1]]
-    progress = ('status', 'completed_updates', 'last_checkpoint')
+    progress = ('status', 'completed_updates', 'optimizer_step', 'last_checkpoint')
+    saved = {
+        'completed_updates': 4,
+        'optimizer_step': 4,
+        'last_checkpoint': str(checkpoint),
+    }
     assert [{k: record[k] for k in progress} for record in records] == [
-        {'status': 'running', 'completed_updates': 0, 'last_checkpoint': None},
         {
-            'status': 'complete',
-            'completed_updates': 4,
-            'last_checkpoint': str(checkpoint),
+            'status': 'running',
+            'completed_updates': 0,
+            'optimizer_step': 0,
+            'last_checkpoint': None,
         },
+        {'status': 'running', **saved},
+        {'status': 'complete', **saved},
     ]
     started_at = datetime.fromisoformat(records[0]['started_at'])
     assert started_at.utcoffset() == timezone.utc.utcoffset(None)
     run_json = json.loads((checkpoint.parent / 'manifest' / 'run.json').read_text())
-    assert run_json == records[1]
+    assert run_json == records[-1]
     assert checkpoint.is_file()
 
 
@@ -253,8 +322,8 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
 def test_manifest_after_failure(
     monkeypatch, tiny_settings, tmp_path, manifest_fields, jsonl, error, status, resume
 ):
-    from tmt.runtime import train
     from tmt.model import Model
+    from tmt.runtime import train
 
     train_step = Model.train_step
     data = tmp_path / 'train.bin'
@@ -277,7 +346,7 @@ def test_manifest_after_failure(
     settings = None if resume else tiny_settings
     handler = signal.getsignal(signal.SIGINT)
     with pytest.raises(error):
-        train(settings, checkpoint, str(data), 3, 17, True, resume)
+        train(settings, checkpoint, str(data), 3, 17, ce_only=True, resume=resume)
     assert signal.getsignal(signal.SIGINT) == handler
 
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
@@ -292,10 +361,14 @@ def test_manifest_after_failure(
         'resume': resume,
         'initial_optimizer_step': 2 if resume else 0,
         'last_checkpoint': str(checkpoint.resolve()) if resume else None,
+        'error': None
+        if resume
+        else {'type': 'OSError', 'message': 'injected update failure'},
     }
     assert set(record) == manifest_fields
     assert {k: record[k] for k in expected} == expected
-    (loss_row,) = jsonl(checkpoint.parent / 'manifest/loss.jsonl')
+    *earlier, loss_row = jsonl(checkpoint.parent / 'manifest/loss.jsonl')
+    assert [r['optimizer_step'] for r in earlier] == ([2] if resume else [])
     expected_row = {
         'completed_updates': 1,
         'objective': 'ce_only',
@@ -319,7 +392,7 @@ def test_short_documents_fail_the_run(tiny_settings, tmp_path):
     (tmp_path / 'data' / 'one.bin').write_bytes(b'x')
     checkpoint = tmp_path / 'run' / 'model.safetensors'
     with pytest.raises(ValueError, match='no training targets found in data pass'):
-        train(tiny_settings, checkpoint, str(tmp_path / 'data/*.bin'), updates=1, seed=11)
+        train(tiny_settings, checkpoint, str(tmp_path / 'data/*.bin'), 1, 11)
 
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
     expected = {
@@ -328,25 +401,13 @@ def test_short_documents_fail_the_run(tiny_settings, tmp_path):
         'updates': 1,
         'completed_updates': 0,
         'initial_optimizer_step': 0,
+        'error': {
+            'type': 'ValueError',
+            'message': 'no training targets found in data pass',
+        },
     }
     assert {k: record[k] for k in expected} == expected
     assert not checkpoint.exists()
-
-
-def test_checkpoint_every_500_updates(capsys, tiny_settings, tmp_path):
-    from tmt.runtime import train
-
-    data = tmp_path / 'train.bin'
-    data.write_bytes(b'abcdefghijklmnopqrstuvwxyz')
-    checkpoint = tmp_path / 'model.safetensors'
-    train(tiny_settings, checkpoint, str(data), updates=501, seed=11, log_every=1000)
-
-    lines = capsys.readouterr().out.splitlines()
-    assert [line for line in lines if line.startswith('saved checkpoint:')] == [
-        f'saved checkpoint: {checkpoint}, updates: 500, step: 500',
-        f'saved checkpoint: {checkpoint}, updates: 501, step: 501',
-    ]
-    assert lines[-1] == f'updates: 501, step: 501, checkpoint: {checkpoint}'
 
 
 def test_post_update_action_order(monkeypatch, tmp_path):
@@ -415,8 +476,8 @@ def test_loss_rows(
     ce_only,
     ends,
 ):
-    from tmt.runtime import train
     from tmt.model import Model
+    from tmt.runtime import train
 
     data = tmp_path / 'train.bin'
     data.write_bytes(b'abcdef')
@@ -546,6 +607,8 @@ def test_sampling(capsys, tiny_settings, tmp_path, snapshot, jsonl):
     ]
     keys = ('completed_updates', 'optimizer_step')
     assert [{k: row[k] for k in keys} for row in jsonl(samples)] == [
+        {'completed_updates': 2, 'optimizer_step': 2},
+        {'completed_updates': 4, 'optimizer_step': 4},
         {'completed_updates': 1, 'optimizer_step': 5},
         {'completed_updates': 2, 'optimizer_step': 6},
     ]
@@ -553,7 +616,8 @@ def test_sampling(capsys, tiny_settings, tmp_path, snapshot, jsonl):
 
 def test_interval_evaluation(tiny_settings, tmp_path, snapshot, jsonl):
     from tmt.benchmark import evaluate
-    from tmt.runtime import documents, train
+    from tmt.data import documents
+    from tmt.runtime import train
 
     training = tmp_path / 'training.bin'
     training.write_bytes(b'abcdefghij')
@@ -693,6 +757,7 @@ def test_sweep_argument_dispatch(monkeypatch, run_cli):
     args += ['--development', 'dev/*', '--output', 'runs/grid']
     monitoring = ['--sample-every', '2', '--sample-bytes', '3']
     monitoring += ['--eval-data', 'held-out/*', '--eval-every', '5']
+    monitoring += ['--save-every', '7']
 
     for extra, config in (
         ([], 'model.json'),
@@ -706,6 +771,7 @@ def test_sweep_argument_dispatch(monkeypatch, run_cli):
         'sample_bytes': 3,
         'eval_data': 'held-out/*',
         'eval_every': 5,
+        'save_every': 7,
     }
     assert {k: command_calls[-1][1][k] for k in expected} == expected
 
@@ -714,7 +780,7 @@ def test_sweep_runs_grid(
     monkeypatch, capsys, tiny_settings, tmp_path, manifest_fields, jsonl
 ):
     from tmt.blocks import BLOCKS
-    from tmt.checkpoint import load_model
+    from tmt.checkpoint import load_checkpoint
     from tmt.runtime import sweep
 
     grid, config = tmp_path / 'grid.json', tmp_path / 'model.json'
@@ -735,7 +801,7 @@ def test_sweep_runs_grid(
     }
     monkeypatch.setitem(BLOCKS, 'rtu-test', BLOCKS['rtu'])
     best = sweep(
-        grid, str(training), str(development), output, config, 2, 11, False, **options
+        grid, str(training), str(development), output, config, 2, 11, **options
     )
 
     rows = jsonl(output / 'results.jsonl')
@@ -781,7 +847,7 @@ def test_sweep_runs_grid(
         samples = jsonl(folder / 'samples.jsonl')
         assert [(r['completed_updates'], r['bytes']) for r in samples] == [(2, 3)]
         assert len(Path(samples[0]['path']).read_bytes()) == 3
-        model, settings = load_model(checkpoint, row['seed'])
+        model, settings = load_checkpoint(checkpoint)
         assert settings == row['settings'], 'loaded checkpoint settings differ'
         assert model.count() == row['trainable_parameters']
         assert model.temporal_gradient == row['temporal_gradient']

@@ -1,10 +1,12 @@
+"""Model setting defaults and partial JSON configuration files."""
+
 from __future__ import annotations
 
-import json
 from os import PathLike
 from typing import Any
 
 from . import validation
+from .records import read_json
 
 MODEL_DEFAULTS: dict[str, Any] = {
     'dim': 512,
@@ -18,19 +20,10 @@ MODEL_DEFAULTS: dict[str, Any] = {
 
 
 def load_config(path: str | PathLike[str] | None = None) -> dict[str, Any]:
-    overrides: Any = {}
-    if path is not None:
-        with open(path) as file:
-            overrides = json.load(file)
-
+    overrides: Any = {} if path is None else read_json(path)
     validation.require(
         isinstance(overrides, dict), 'model config must be a JSON object'
     )
-    for name in overrides:
-        if name not in MODEL_DEFAULTS:
-            raise ValueError(
-                f'invalid model config: got an unexpected keyword argument {name!r}'
-            )
     resolved = {
         name: list(value) if isinstance(value, tuple) else value
         for name, value in {**MODEL_DEFAULTS, **overrides}.items()

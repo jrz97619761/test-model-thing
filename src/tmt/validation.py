@@ -7,6 +7,7 @@ import math
 import os
 from collections.abc import Iterable, Mapping
 from os import PathLike
+from pathlib import Path
 from typing import Any
 
 
@@ -28,7 +29,7 @@ def is_finite_number(value: Any) -> bool:
 
 
 def positive(value: int, name: str) -> None:
-    require(not value <= 0, f'{name} must be positive')
+    require(value > 0, f'{name} must be positive')
 
 
 def keys(
@@ -61,6 +62,17 @@ def matches_arrays(
         matches_array(actual[name], value.shape, value.dtype)
         for name, value in expected.items()
     )
+
+
+def evaluation_targets(documents: Iterable[bytes]) -> int:
+    """Count next-byte targets and require at least one."""
+    targets = sum(max(len(document) - 1, 0) for document in documents)
+    require(
+        targets,
+        'evaluation requires at least one target byte pair '
+        '(a document with at least two bytes)',
+    )
+    return targets
 
 
 def checkpoint_arrays(
@@ -130,7 +142,7 @@ def metadata(raw: Any) -> dict[str, Any]:
     require(isinstance(raw, str), 'checkpoint __metadata__.tmt must be a string')
     try:
         value = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as error:
+    except ValueError as error:
         raise ValueError(f'checkpoint tmt metadata is invalid JSON: {error}') from error
     require(
         isinstance(value, dict) and set(value) == {'version', 'model'},
@@ -144,9 +156,9 @@ def metadata(raw: Any) -> dict[str, Any]:
 
 
 def _model_core_settings(settings: Mapping[str, Any], label: str) -> None:
-    from tmt.blocks import BLOCKS
+    from .blocks import BLOCKS
 
-    choices = ', '.join(BLOCKS)
+    choices = ', '.join(sorted(BLOCKS))
     require(
         isinstance(settings['block'], str) and settings['block'] in BLOCKS,
         f'{label}.block must be one of: {choices}',
@@ -166,7 +178,7 @@ def _model_core_settings(settings: Mapping[str, Any], label: str) -> None:
         )
     bound = settings['bound']
     require(
-        isinstance(bound, list)
+        isinstance(bound, (list, tuple))
         and len(bound) == 2
         and all(type(value) is int for value in bound)
         and 0 <= bound[0] < bound[1],
@@ -192,7 +204,7 @@ def _model_extension_settings(
 
 
 def model_settings(settings: Any, label: str) -> dict[str, Any]:
-    from tmt.config import MODEL_DEFAULTS
+    from .config import MODEL_DEFAULTS
 
     require(isinstance(settings, dict), f'{label} must be an object')
     keys(settings, MODEL_DEFAULTS, label)
@@ -215,6 +227,13 @@ def seed(value: Any, name: str = 'seed') -> None:
     require(0 <= value < 2**64, f'{name} must be between 0 and {2**64 - 1}')
 
 
+def output_folder(path: str | PathLike[str]) -> None:
+    """Require the parent folder of an output file before expensive work."""
+    folder = Path(path).parent
+    if not folder.is_dir():
+        raise FileNotFoundError(f'output folder {folder} does not exist')
+
+
 def run_name(name: str) -> None:
     require(
         name
@@ -227,11 +246,13 @@ def run_name(name: str) -> None:
 def monitoring(
     sample_every: int | None,
     sample_prompt: str,
+    sample_seed: Any,
     sample_bytes: int,
     eval_data: str | None,
     eval_every: int | None,
     eval_max_bytes: int,
 ) -> None:
+    seed(sample_seed, 'sample-seed')
     positive(sample_bytes, 'sample-bytes')
     require(sample_prompt, 'sample-prompt must not be empty')
     positive(eval_max_bytes, 'eval-max-bytes')
@@ -245,11 +266,8 @@ def monitoring(
         positive(eval_every, 'eval-every')
 
 
-def training_options(
-    seed_value: Any, sample_seed: Any, updates: int, log_every: int
-) -> None:
+def training_options(seed_value: Any, updates: int, log_every: int) -> None:
     seed(seed_value)
-    seed(sample_seed, 'sample-seed')
     positive(updates, 'updates')
     positive(log_every, 'log-every')
 
@@ -271,7 +289,7 @@ def sweep_grid(grid: Any, settings: Mapping[str, Any]) -> None:
 
 
 def block_name(name: Any) -> str:
-    from tmt.blocks import BLOCKS
+    from .blocks import BLOCKS
 
     require(
         isinstance(name, str) and name in BLOCKS,

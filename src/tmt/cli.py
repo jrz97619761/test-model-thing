@@ -1,3 +1,5 @@
+"""Command-line parsing, help routing, and dispatch to runtime operations."""
+
 from __future__ import annotations
 
 import argparse
@@ -5,77 +7,16 @@ import glob
 import json
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from os import PathLike
 from pathlib import Path
-from typing import Any, NamedTuple, Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 from . import validation
 from .config import load_config
 from .records import build_run_manifest, write_json
-from .runtime import evaluate_checkpoint, generate, sweep, train
-
-
-def evaluate_command(args: argparse.Namespace) -> None:
-    validation.positive(args.max_bytes, 'max-bytes')
-    for window in args.windows:
-        validation.positive(window, 'evaluation windows')
-    result = evaluate_checkpoint(
-        args.checkpoint, args.data, args.max_bytes, args.windows
-    )
-    print(
-        f'input bytes: {result["input_bytes"]}, targets: {result["targets"]}, '
-        f'BPB: {result["bpb"]}'
-    )
-    print(
-        f'common targets: {result["common_targets"]}, '
-        f'common BPB: {result["common_bpb"]}'
-    )
-    for window in result['windows']:
-        print(
-            f'window {window["window"]}: BPB {window["bpb"]}, '
-            f'common BPB {window["common_bpb"]}, delta {window["delta_bpb"]}'
-        )
-    if args.output is not None:
-        write_json(args.output, result)
-
-
-def init_config(path: str | PathLike[str] | None = None) -> None:
-    settings = load_config()
-    example_run = build_run_manifest(
-        config=settings,
-        trainable_parameters=None,
-        temporal_gradient=None,
-        seed=11,
-        data_glob='data/train/*',
-        data_files=[],
-        updates=1000,
-        log_every=100,
-        objective='tmt',
-    )
-    templates = (
-        {path: settings}
-        if path is not None
-        else {
-            'model.json': settings,
-            'grid.json': {
-                'dim': [4, 8],
-                'layers': [1],
-                'spread': [4],
-                'block': ['rtu'],
-                'seed': [11, 22],
-            },
-            'run.example.json': example_run,
-        }
-    )
-    for destination, value in templates.items():
-        destination = Path(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        write_json(destination, value, exclusive=True)
-        print(f'Wrote template to {destination}')
-    if path is None:
-        for directory in ('data/train', 'data/dev', 'runs'):
-            Path(directory).mkdir(parents=True, exist_ok=True)
+from .runtime import evaluate_checkpoint, generate, inspect_checkpoint, sweep, train
 
 
 def version_text() -> str:
@@ -124,7 +65,7 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 1000,
-            'help': 'target-byte optimizer updates per run, default: 1000',
+            'help': 'target-byte optimizer updates per run; default: 1000',
         },
     ),
     (
@@ -132,7 +73,15 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 100,
-            'help': 'positive loss report interval in updates, default: 100',
+            'help': 'positive loss report interval in updates; default: 100',
+        },
+    ),
+    (
+        ('--save-every',),
+        {
+            'type': int,
+            'default': 500,
+            'help': 'positive checkpoint save interval in updates; default: 500',
         },
     ),
     (
@@ -158,19 +107,19 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         ('--sample-prompt',),
         {
             'default': 'The ',
-            'help': 'fixed nonempty sample prompt, default: "The "',
+            'help': 'fixed nonempty sample prompt; default: "The "',
         },
     ),
     (
         ('--sample-seed',),
-        {'type': int, 'default': 11, 'help': 'fixed sample seed, default: 11'},
+        {'type': int, 'default': 11, 'help': 'fixed sample seed; default: 11'},
     ),
     (
         ('--sample-bytes',),
         {
             'type': int,
             'default': 256,
-            'help': 'positive sample byte count, default: 256',
+            'help': 'positive sample byte count; default: 256',
         },
     ),
     (
@@ -189,7 +138,7 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 8192,
-            'help': 'positive held-out input byte budget, default: 8192',
+            'help': 'positive held-out input byte budget; default: 8192',
         },
     ),
 )
@@ -206,7 +155,8 @@ TRAIN_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         ('--run',),
         {
             'help': 'one relative folder name under runs/; '
-            'default: UTC timestamp with microseconds; excludes checkpoint and --resume',
+            'default: UTC timestamp with microseconds; '
+            'excludes checkpoint and --resume',
         },
     ),
 )
@@ -215,7 +165,7 @@ TRAIN_SETTINGS_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     (
         ('--config',),
         {
-            'help': 'fresh model JSON, default: model.json in current folder; '
+            'help': 'fresh model JSON; default: model.json in current folder; '
             'excludes --resume',
         },
     ),
@@ -240,7 +190,8 @@ EVALUATE_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 8192,
-            'help': 'positive global input-byte prefix across sorted files, default: 8192',
+            'help': 'positive global input-byte prefix across sorted files; '
+            'default: 8192',
         },
     ),
     (
@@ -265,7 +216,7 @@ BENCHMARK_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 1,
-            'help': 'positive CoLA classifier epochs, default: 1',
+            'help': 'positive CoLA classifier epochs; default: 1',
         },
     ),
     (
@@ -273,7 +224,7 @@ BENCHMARK_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': float,
             'default': 0.5,
-            'help': 'contiguous CoLA train fraction, default: 0.5',
+            'help': 'contiguous CoLA train fraction; default: 0.5',
         },
     ),
     (
@@ -281,6 +232,10 @@ BENCHMARK_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {'help': 'optional four-column CoLA TSV; default: byte suite only'},
     ),
     (('--seed',), {'type': int, 'required': True, 'help': 'CoLA head seed'}),
+    (
+        ('--output',),
+        {'help': 'optional JSON result file; default: terminal only'},
+    ),
 )
 
 GENERATE_ARGUMENTS: tuple[ArgumentSpec, ...] = (
@@ -299,7 +254,7 @@ GENERATE_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 512,
-            'help': 'number of output bytes, default: 512',
+            'help': 'number of output bytes; default: 512',
         },
     ),
     (
@@ -307,7 +262,7 @@ GENERATE_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 1000,
-            'help': 'positive progress interval in output bytes, default: 1000',
+            'help': 'positive progress interval in output bytes; default: 1000',
         },
     ),
     (
@@ -318,6 +273,10 @@ GENERATE_ARGUMENTS: tuple[ArgumentSpec, ...] = (
             'default: checkpoint value',
         },
     ),
+)
+
+INSPECT_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (('checkpoint',), {'help': 'strict checkpoint to summarize'}),
 )
 
 SWEEP_ARGUMENTS: tuple[ArgumentSpec, ...] = (
@@ -340,7 +299,7 @@ SWEEP_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         ('--config',),
         {
             'default': 'model.json',
-            'help': 'base model JSON, default: model.json in current folder',
+            'help': 'base model JSON; default: model.json in current folder',
         },
     ),
     (
@@ -348,7 +307,7 @@ SWEEP_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 8192,
-            'help': 'positive global development input-byte prefix, default: 8192',
+            'help': 'positive global development input-byte prefix; default: 8192',
         },
     ),
 )
@@ -356,6 +315,7 @@ SWEEP_ARGUMENTS: tuple[ArgumentSpec, ...] = (
 MONITORING_OPTIONS = (
     'sample_every',
     'sample_prompt',
+    'sample_seed',
     'sample_bytes',
     'eval_data',
     'eval_every',
@@ -413,10 +373,19 @@ def _monitoring_options(args: argparse.Namespace) -> dict[str, Any]:
     return {name: getattr(args, name) for name in MONITORING_OPTIONS}
 
 
-def _validate_training_args(args: argparse.Namespace) -> None:
-    validation.training_options(
-        args.seed, args.sample_seed, args.updates, args.log_every
+def _option_default(specifications: Sequence[ArgumentSpec], option: str) -> Any:
+    return next(
+        options['default'] for names, options in specifications if option in names
     )
+
+
+def _bpb(value: float | None) -> str:
+    return 'none' if value is None else f'{value:.6f}'
+
+
+def _validate_training_args(args: argparse.Namespace) -> None:
+    validation.training_options(args.seed, args.updates, args.log_every)
+    validation.positive(args.save_every, 'save-every')
     validation.monitoring(**_monitoring_options(args))
 
 
@@ -444,11 +413,50 @@ def _resolve_train_path(
         checkpoint = folder / 'model.safetensors'
     else:
         checkpoint = args.checkpoint
+        if not args.resume and Path(checkpoint).exists():
+            raise FileExistsError(
+                f'checkpoint {checkpoint} exists; use --resume, or remove it'
+            )
     return settings, checkpoint, new_run
 
 
 def _run_init(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    init_config(args.output)
+    settings = load_config()
+    example_run = build_run_manifest(
+        config=settings,
+        trainable_parameters=None,
+        temporal_gradient=None,
+        seed=11,
+        data_glob='data/train/*',
+        data_files=[],
+        updates=_option_default(SHARED_TRAINING_ARGUMENTS, '--updates'),
+        log_every=_option_default(SHARED_TRAINING_ARGUMENTS, '--log-every'),
+        save_every=_option_default(SHARED_TRAINING_ARGUMENTS, '--save-every'),
+        objective='tmt',
+    )
+    templates = (
+        {args.output: settings}
+        if args.output is not None
+        else {
+            'model.json': settings,
+            'grid.json': {
+                'dim': [4, 8],
+                'layers': [1],
+                'spread': [4],
+                'block': ['rtu'],
+                'seed': [11, 22],
+            },
+            'run.example.json': example_run,
+        }
+    )
+    for destination, value in templates.items():
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        write_json(destination, value, exclusive=True)
+        print(f'wrote template: {destination}')
+    if args.output is None:
+        for directory in ('data/train', 'data/dev', 'runs'):
+            Path(directory).mkdir(parents=True, exist_ok=True)
 
 
 def _run_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -460,24 +468,50 @@ def _run_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Non
         args.data,
         args.updates,
         args.seed,
-        args.ce_only,
-        args.resume,
-        args.log_every,
+        ce_only=args.ce_only,
+        resume=args.resume,
+        log_every=args.log_every,
         new_run=new_run,
-        sample_seed=args.sample_seed,
+        save_every=args.save_every,
         **_monitoring_options(args),
     )
 
 
 def _run_evaluate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    evaluate_command(args)
+    result = evaluate_checkpoint(
+        args.checkpoint, args.data, args.max_bytes, args.windows
+    )
+    print(
+        f'input bytes: {result["input_bytes"]}, targets: {result["targets"]}, '
+        f'BPB: {_bpb(result["bpb"])}'
+    )
+    print(
+        f'common targets: {result["common_targets"]}, '
+        f'common BPB: {_bpb(result["common_bpb"])}'
+    )
+    for window in result['windows']:
+        delta = window['delta_bpb']
+        print(
+            f'window {window["window"]}: BPB {_bpb(window["bpb"])}, '
+            f'common BPB {_bpb(window["common_bpb"])}, '
+            f'delta {"none" if delta is None else f"{delta:+.6f}"}'
+        )
+    if args.output is not None:
+        write_json(args.output, result)
 
 
 def _run_benchmark(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     validation.seed(args.seed)
-    from tmt.benchmark import run
+    from .benchmark import run
 
-    run(args.checkpoint, args.epochs, args.split, args.cola_data, seed=args.seed)
+    run(
+        args.checkpoint,
+        args.epochs,
+        args.split,
+        args.cola_data,
+        seed=args.seed,
+        output=args.output,
+    )
 
 
 def _run_generate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -488,9 +522,9 @@ def _run_generate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         args.prompt,
         args.output,
         args.seed,
-        args.bytes,
-        args.temperature,
-        args.log_every,
+        count=args.bytes,
+        temperature=args.temperature,
+        log_every=args.log_every,
     )
 
 
@@ -504,12 +538,29 @@ def _run_sweep(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Non
         args.config,
         args.updates,
         args.seed,
-        args.ce_only,
-        args.max_bytes,
-        args.log_every,
-        sample_seed=args.sample_seed,
+        ce_only=args.ce_only,
+        max_bytes=args.max_bytes,
+        log_every=args.log_every,
+        save_every=args.save_every,
         **_monitoring_options(args),
     )
+
+
+def _run_inspect(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    summary = inspect_checkpoint(args.checkpoint)
+    print(
+        f'checkpoint: {args.checkpoint}, step: {summary["optimizer_step"]}, '
+        f'trainable parameters: {summary["trainable_parameters"]}'
+    )
+    print(f'config: {json.dumps(summary["config"])}')
+    run = summary['run']
+    if run is None:
+        print('run manifest: none')
+    else:
+        print(
+            f'run status: {run["status"]}, objective: {run["objective"]}, '
+            f'seed: {run["seed"]}, updates: {run["completed_updates"]}'
+        )
 
 
 def _run_help(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -519,7 +570,8 @@ def _run_help(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
 type CommandHandler = Callable[[argparse.Namespace, argparse.ArgumentParser], None]
 
 
-class CommandSpec(NamedTuple):
+@dataclass(frozen=True)
+class CommandSpec:
     name: str
     help: str
     handler: CommandHandler
@@ -559,6 +611,12 @@ COMMANDS: tuple[CommandSpec, ...] = (
         _run_sweep,
         SWEEP_ARGUMENTS,
         shared_training=True,
+    ),
+    CommandSpec(
+        'inspect',
+        'show checkpoint state and run status',
+        _run_inspect,
+        INSPECT_ARGUMENTS,
     ),
     CommandSpec('help', 'read the bundled command manual or one topic', _run_help),
 )
@@ -638,7 +696,6 @@ def console_main(argv: Sequence[str] | None = None) -> None:
 
     Ctrl-C prints one line instead of a traceback. The KeyboardInterrupt still
     propagates, so Python finalizes and then exits through SIGINT, as shells expect.
-    This is the easiest fix for the traceback issue.
     """
     try:
         main(argv)
