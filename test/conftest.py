@@ -162,7 +162,7 @@ def model_free_cli(tmp_path):
 import builtins, runpy, sys
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
-    if name in ('tmt.main', 'tmt.benchmark', 'mlx') or name.startswith('mlx.'):
+    if name in ('tmt.model', 'tmt.benchmark', 'mlx') or name.startswith('mlx.'):
         raise ImportError('model import forbidden')
     return original(name, *args, **kwargs)
 builtins.__import__ = guarded

@@ -43,7 +43,7 @@ def test_train_visits_byte_pairs_and_resumes(
     monkeypatch, capsys, tiny_settings, tmp_path, snapshot
 ):
     from tmt.cli import train
-    from tmt.main import Model
+    from tmt.model import Model
 
     data = tmp_path / 'train.bin'
     data.write_bytes(bytes((0, 255, 65, 10)))
@@ -117,7 +117,7 @@ def test_sigint_saves_complete_update(
 ):
     import mlx.core as mx
     from tmt.checkpoint import load_checkpoint
-    from tmt.main import Model
+    from tmt.model import Model
     from tmt.runtime import TrainingRun, train
 
     data = tmp_path / 'train.bin'
@@ -181,7 +181,7 @@ def test_train_in_worker_thread(tiny_settings, tmp_path):
 
 def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
     from tmt.cli import train
-    from tmt.main import Model
+    from tmt.model import Model
 
     records, calls, paths = [], [], {}
     train_step, original_dump = Model.train_step, json.dump
@@ -254,7 +254,7 @@ def test_manifest_after_failure(
     monkeypatch, tiny_settings, tmp_path, manifest_fields, jsonl, error, status, resume
 ):
     from tmt.cli import train
-    from tmt.main import Model
+    from tmt.model import Model
 
     train_step = Model.train_step
     data = tmp_path / 'train.bin'
@@ -415,7 +415,7 @@ def test_loss_rows(
     ends,
 ):
     from tmt.cli import train
-    from tmt.main import Model
+    from tmt.model import Model
 
     data = tmp_path / 'train.bin'
     data.write_bytes(b'abcdef')

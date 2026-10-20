@@ -5,7 +5,7 @@ from mlx.utils import tree_flatten
 import pytest
 
 from tmt.blocks import BLOCKS, Block, Layer
-from tmt.main import Model
+from tmt.model import Model
 
 
 class MatrixCache(Block):

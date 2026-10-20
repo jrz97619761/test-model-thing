@@ -99,7 +99,7 @@ def test_load_config(tmp_path, monkeypatch):
 
     from tmt import config
     from tmt.cli import load_config
-    from tmt.main import Model
+    from tmt.model import Model
 
     defaults = load_config()
     assert config.load_config() == defaults
@@ -211,7 +211,7 @@ def test_init_writes_templates(run_cli, tmp_path, manifest_fields):
     import inspect
 
     from tmt.cli import load_config
-    from tmt.main import Model
+    from tmt.model import Model
 
     repo = Path(__file__).resolve().parents[1]
     assert run_cli('init')[0] == 0

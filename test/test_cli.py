@@ -493,7 +493,7 @@ def test_train_sigint_saves_checkpoint(workspace, snapshot):
 import os
 import signal
 from tmt.cli import main
-from tmt.main import Model
+from tmt.model import Model
 
 update = Model.updategrads
 def interrupt(model, grads):

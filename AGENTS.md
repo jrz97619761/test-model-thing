@@ -1,116 +1,145 @@
 # Agent guide for TMT
 
-## Scope and work
+TMT is an experimental byte-level language model that uses MLX.
+The repository contains the model, a CLI, experiment records, and tests.
+Small fixtures check numerical behavior and command workflows. They do not establish model quality.
 
-TMT is an experimental MLX byte-level language model with recurrent state, recurrent trace units, and latent-space prediction. Treat quality claims as experiment results. Small fixtures check behavior, not model quality.
+## Source map
 
-Before a change, inspect the relevant source, tests, docs, and `git status --short`. Trace inputs, model state, outputs, and failure paths. Preserve user changes. Keep edits small and follow local style. Preserve JSON key order in examples.
+All package paths below are relative to `src/tmt/`.
 
-Read directly relevant skills before use. Use primary sources for current technical claims and Context7 for current library docs when available. Report unavailable tools and checks you did not run.
-
-## Repository map
-
-| Path | Purpose |
+| File | Responsibility |
 | --- | --- |
-| `src/tmt/model.py` | Model arithmetic, RTU traces, loss, optimizer updates, and sample generation |
-| `src/tmt/main.py` | Compatibility imports for the model classes |
-| `src/tmt/config.py` | Model defaults and partial JSON configuration |
-| `src/tmt/cli.py` | CLI parser, help, validation, and command dispatch |
-| `src/tmt/checkpoint.py` | Model creation and strict checkpoint I/O |
-| `src/tmt/runtime.py` | Train, evaluation, generation, and sweep operations |
-| `src/tmt/data.py` | Raw-byte file selection and document reads |
-| `src/tmt/records.py` | Manifest fields and JSON output |
-| `src/tmt/validation.py` | Shared input, metadata, and array validation |
-| `src/tmt/blocks.py` | Block contracts, runtime state, and RTU layers |
-| `src/tmt/benchmark.py` | Frozen byte evaluation, fixed benchmark fixtures, and optional CoLA classification |
-| `src/tmt/__main__.py` | Entry point for `python -m tmt` |
-| `src/tmt/commands.md` | Packaged command manual, also returned by `tmt help` |
-| `test/test_model.py` | Model arithmetic, loss, RTU recurrence, gradients, and the RTU baseline (with recorder) |
-| `test/test_blocks.py` | Block contracts, state, restore, checkpoints, and schema checks |
-| `test/test_benchmark.py` | Byte evaluation, CoLA row checks, benchmark run, and `python -m tmt.benchmark` |
-| `test/test_config.py` | Config, init templates, examples, validation order, and checkpoint file checks |
-| `test/test_cli.py` | Help, version, argument and value errors, generate, evaluate, and the installed-command smoke test |
-| `test/test_train.py` | Train loop, manifests, loss rows, samples, interval evaluation, and sweep |
-| `test/conftest.py`, `test/fixtures/` | Shared fixtures and the fixed RTU baseline |
-| `examples/` | Default model, tiny model, and sweep grid JSON files |
-| `pyproject.toml` | Package metadata, console entry point, and packaged resources |
+| `model.py` | `Encoder`, `Decoder`, `Model`, objective loss, optimizer updates, and byte samples |
+| `blocks.py` | `Block`, the RTU `Layer`, block registry, recurrent state, and gradient traces |
+| `config.py` | `MODEL_DEFAULTS` and partial JSON configuration through `load_config()` |
+| `validation.py` | Input checks, checkpoint metadata and tensor checks, and block contracts |
+| `checkpoint.py` | Seeded model creation and Safetensors save/load |
+| `data.py` | `ByteFiles`, file selection, readability checks, and raw-byte document reads |
+| `runtime.py` | `TrainingRun`, train loops, samples, checkpoint evaluation, generation, and sweeps |
+| `records.py` | Typed manifest records, JSON output, and JSONL output |
+| `benchmark.py` | Frozen byte evaluation, fixed byte fixtures, and optional CoLA classification |
+| `cli.py`, `__main__.py` | Argument parsing, command dispatch, and `python -m tmt` |
+| `commands.md` | Packaged command manual, also returned by `tmt help` |
 
-`README.md` and `VISION.md` contain the author's project description and personal views. Preserve their voice.
-Do not rewrite these documents unless the task requires it.
+`pyproject.toml` defines the package, dependencies, Python versions, console script, and package data.
+`examples/` contains model configurations, a sweep grid, and a run manifest example.
+The model import is `from tmt.model import Model`. There is no `tmt.main` compatibility module.
 
-## Environment and checks
+## Work on this repository
 
-Use Python 3.12, 3.13, or 3.14. Model commands and most tests require a functional MLX runtime.
-Use a suitable virtual environment if one is available. Otherwise, create one at the repository root:
+- Inspect `git status --short` before edits. Preserve uncommitted changes.
+- Read the affected source and tests before a change. Trace inputs, recurrent state, outputs, and failure paths.
+- Keep changes within the requested scope. Use the local code style.
+- Keep data helpers in `data.py`, as its module documentation requests.
+- Resolve discrepancies against the implementation and tests. Do not use this guide as proof that behavior is correct.
+- Update this guide when a change affects its paths or contracts.
+
+`README.md` and `VISION.md` contain the author's prose and views.
+Preserve their voice. Edit them only when the task requires it.
+
+## Setup and checks
+
+The package declares Python `>=3.12,<3.15` and an MLX dependency.
+Model operations need a functional MLX runtime.
+Reuse a suitable virtual environment when one is available.
+Otherwise, use Python 3.12, 3.13, or 3.14 to create one:
 
 ```sh
-# Use python3.12, python3.13, or python3.14.
-python3.12 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[test]'
 ```
 
-The source uses the `src/` layout. Install the package before checks.
-An editable installation makes source edits available to the CLI and its subprocess tests.
-After a regular installation, install again before you check source changes.
+The editable installation supports imports from the `src/` layout and CLI subprocess tests.
+The `test` extra supplies pytest. Use the selected environment for all checks.
 
-Run these checks from the repository root for code changes:
+For code changes, run these commands from the repository root:
 
 ```sh
-.venv/bin/python -m pytest
-.venv/bin/python -m tmt --help
-.venv/bin/python -m tmt --version
-.venv/bin/python -m pip check
+python -m pytest
+python -m tmt --help
+python -m tmt --version
+python -m pip check
 ```
 
-- Use `pytest` for tests. Keep test dependencies in the `test` extra.
-- For Python compatibility changes, run the checks in Python 3.12, 3.13, and 3.14 environments.
-- Run `python -m pip check` in each environment to check dependency conflicts.
-- Add regression tests for meaningful behavior changes. Cover relevant failure paths.
-- For documentation-only edits, check paths, commands, and claims against the source. Model runs are unnecessary.
-- For package changes, verify installed entry points and access to `commands.md` outside the checkout.
-- If MLX cannot run, report the limitation. Do not replace MLX or weaken tests to obtain a pass.
-- Report the checks that ran and any checks that remain incomplete.
+- Add regression tests for meaningful behavior changes and relevant failure paths.
+- For Python compatibility changes, run these checks under Python 3.12, 3.13, and 3.14 when available.
+- For package changes, verify installed commands and the packaged manual outside the checkout.
+- For documentation-only changes, verify paths, commands, and claims against the source. Model runs are unnecessary.
+- Report checks that fail or cannot run. Do not replace MLX or weaken tests to obtain a pass.
+
+The tests are in `test/`:
+
+| File | Coverage |
+| --- | --- |
+| `test_model.py` | Loss, gradients, recurrence, import behavior, and the fixed RTU baseline |
+| `test_blocks.py` | Block contracts, state, gradient hooks, features, and checkpoint round trips |
+| `test_benchmark.py` | Byte scores, CoLA input and output, and benchmark entry points |
+| `test_config.py` | Configuration, templates, checkpoint validation, atomic saves, and RNG preservation |
+| `test_cli.py` | Help, errors, byte files, generation, evaluation, interrupts, and installed commands |
+| `test_train.py` | Train updates, resume, manifests, samples, evaluation intervals, and sweeps |
+
+`test/conftest.py` supplies shared fixtures.
+`test/fixtures/rtu-baseline.json` records seeded numerical results.
+Do not regenerate the baseline only to hide a regression. Review any intentional baseline change.
 
 ## Model and evaluation contracts
 
-- Preserve raw-byte input and output. The encoder and decoder use 256 byte values.
-- Keep `MODEL_DEFAULTS` in `src/tmt/config.py` as the source for configuration defaults.
-- Direct `Model` calls require all model fields. `load_config()` resolves partial CLI configuration.
-- If defaults or constructor fields change, check metadata validation, example JSON files, tests, and command documentation.
-- Keep imports free of file writes, prompts, command argument checks, or model runs.
-- Keep CLI help and version available without an MLX import. Preserve lazy imports in `cli.py`.
-- Do not sample in `train_step()`. Keep the sample RNG state unchanged.
-- Preserve RTU gradient contributions and state resets at document boundaries.
-- A frozen step advances recurrent state. It must not change weights, optimizer state, or RTU traces.
-- Byte evaluation must restore recurrent state and RTU traces after success or failure.
-- Check MLX lazy evaluation, `stop_gradient`, and compiled optimizer state when model arithmetic changes.
-- Preserve the fixed byte benchmark documents and context windows for comparable scores.
-- If a task changes benchmark fixtures, change their version identifier and explain the loss of comparability.
-- Keep objective loss, frozen bits per byte, and CoLA MCC separate in reports.
-- Record seeds, configuration, data selection, and budgets for experiments. Distinguish observations from estimates.
+- Preserve raw-byte documents and output. The encoder has 256 byte embeddings, and the decoder returns 256 byte logits.
+- Keep defaults in `MODEL_DEFAULTS`. Direct `Model` construction requires all constructor arguments.
+- Preserve config validation, examples, and checkpoint metadata when model fields change.
+- Keep imports free of prompts, model runs, and file writes.
+- Preserve help and version commands without MLX imports. Inspect the imports in CLI dependencies as well as `cli.py`.
+- Keep `train_step()` free of samples and sample RNG changes. `Model.__call__()` also samples, so these methods are not interchangeable.
+- Preserve RTU gradient contributions and the distinction between recurrent state and gradient traces.
+- A frozen step advances recurrent state without optimizer updates or trace updates.
+- Preserve state and trace restoration in `benchmark.evaluate()` and `runtime._training_sample()` after success or failure.
+- Review MLX evaluation boundaries, `stop_gradient`, and compiled optimizer state when arithmetic changes.
 
-## Checkpoints and workspaces
+`benchmark.py` defines `BYTE_FIXTURE`, `BYTE_DOCUMENTS`, and `CONTEXT_WINDOWS` for the fixed byte suite.
+CoLA uses a separate classifier head while the model weights stay frozen.
+The Python result uses `byte_scores` and `epoch_scores`, plus `feature_source` when CoLA runs.
+The CoLA MCC values use a scale of 100.
 
-- Preserve strict checkpoint validation for metadata, tensor names, shapes, and dtypes.
-- Checkpoints contain model and optimizer tensors with version-1 model metadata.
-- Checkpoint loads preserve the caller's Python and MLX RNG state after success or failure. File order uses a separate seeded RNG.
-- Treat format changes as compatibility changes. Provide explicit migration behavior when the task requires a new format.
-- Resume restores checkpoint settings and optimizer tensors. It starts a new data pass without the previous cursor or RNG state.
-- Do not describe resume as exact continuation. The trainer resets recurrent state and traces at each document.
-- Relative CLI paths use the current directory. Do not add parent-directory searches without an explicit behavior change.
-- Use a temporary workspace for command checks. Keep output paths separate from input paths and previous runs.
-- Use tiny fixtures, such as `dim=4`, `layers=1`, `spread=4`, and a few updates, for smoke checks.
+Keep objective loss, frozen bits per byte, and CoLA MCC distinct in reports.
+Record configuration, seeds, data selection, and budgets for experiments.
+Identify any fixture change that prevents direct score comparisons.
+
+## Checkpoints and train runs
+
+`checkpoint.py` saves model parameters, block runtime arrays, and optimizer tensors.
+The Safetensors metadata contains a `tmt` JSON string with `version: 1` and the resolved model configuration.
+The loader requires the current metadata fields and exact tensor names, shapes, and dtypes.
+
+- Preserve strict checkpoint validation. Provide explicit migration behavior when a requested change alters the format.
+- Preserve the caller's Python and MLX RNG state across checkpoint loads after success or failure.
+- Preserve the temporary-file save and atomic replacement in the destination directory.
+- Preserve the previous checkpoint when a save fails.
+
+Resume restores checkpoint settings and tensors, then starts a new data pass.
+It does not restore the previous file cursor or RNG state.
+The trainer resets recurrent state and traces for each nonempty document.
+File order uses a separate seeded Python RNG.
+
+`TrainingRun.after_update()` controls loss reports, terminal-byte consumption, samples, evaluation, and periodic saves.
+The trainer also saves at normal completion.
+On the main thread, its SIGINT handler records an interrupt request.
+The trainer checks the request at complete update boundaries, after the update actions.
+It saves before it raises `KeyboardInterrupt` for that request.
+Worker threads do not install that handler.
+
+- Preserve update boundaries and action order when the train loop changes.
+- Resolve relative CLI paths from the current directory.
+- Use temporary workspaces and tiny configurations for command checks.
+- Keep check outputs separate from datasets and previous runs.
 - Do not start large train runs or download datasets unless the task requires them.
-- Keep datasets, checkpoints, generated samples, and build artifacts out of commits.
-- The trainer saves every 500 updates and at normal completion. Ctrl-C requests a stop and a save after a complete update. Do not checkpoint partial updates.
-- Checkpoint saves write a temporary file in the destination directory, then atomically replace the destination. Preserve the last successful checkpoint after a failed save.
+- Keep datasets, checkpoints, samples, and build artifacts out of commits.
 
 ## Documentation and handoff
 
-- Update `src/tmt/commands.md` when CLI behavior changes. Check examples for affected instructions.
-- Keep `commands.md` in package data. Help must work outside the checkout.
-- Use plain, concise technical English. Apply the installed `simplified-technical-english` skill to technical prose when available.
-- Lead reviews with actionable defects, ordered by severity. Give file and line evidence.
-- Report what changed, why it changed, verification, and material limits.
-- Do not send external messages, publish results, or perform destructive actions without user authorization.
+- Update `src/tmt/commands.md` when command behavior changes.
+- Keep the manual in package data. Verify affected examples against the implementation.
+- Preserve intentional JSON field order in examples and manifest builders.
+- Use concise technical English. Apply the installed `simplified-technical-english` skill when available.
+- Report what changed, which checks ran, and any material limits.

@@ -37,7 +37,7 @@ def _gradient_summary(array):
 
 def capture_rtu_baseline(config, seed, steps, output_indices, state_rows):
     import mlx.core as mx
-    from tmt.main import Model
+    from tmt.model import Model
 
     random.seed(seed)
     mx.random.seed(seed)
@@ -102,7 +102,7 @@ def blocked(*args, **kwargs): raise AssertionError('import performed an action')
 builtins.open = blocked
 builtins.input = blocked
 argparse.ArgumentParser = blocked
-import tmt.main
+import tmt.model
 """
     result = subprocess.run(
         [sys.executable, '-c', code], cwd=root, capture_output=True, text=True
@@ -262,7 +262,7 @@ def test_loss(loss_case, target, end, ce_only):
 def test_rtu_gradients(monkeypatch):
     import mlx.core as mx
     from tmt.cli import load_config
-    from tmt.main import Model
+    from tmt.model import Model
 
     random.seed(11)
     mx.random.seed(11)

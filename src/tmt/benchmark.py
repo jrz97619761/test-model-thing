@@ -11,7 +11,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as opt
 
-from .main import Model
+from .model import Model
 from . import validation
 
 # Keep these bytes and windows fixed for checkpoint comparisons.

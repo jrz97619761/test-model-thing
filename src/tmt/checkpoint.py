@@ -14,14 +14,14 @@ from typing import TYPE_CHECKING, Any, Mapping
 from . import validation
 
 if TYPE_CHECKING:
-    from .main import Model
+    from .model import Model
 
 
 def new_model(settings: Mapping[str, Any], seed: int) -> Model:
     validation.seed(seed)
     validation.model_settings(settings, 'model config')
     import mlx.core as mx
-    from tmt.main import Model
+    from tmt.model import Model
 
     random.seed(seed)
     mx.random.seed(seed)

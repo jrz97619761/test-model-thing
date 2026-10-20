@@ -22,7 +22,7 @@ Direct Python calls to `Model` require all seven settings. For example:
 
 ```python
 from tmt.cli import load_config
-from tmt.main import Model
+from tmt.model import Model
 
 settings = load_config()
 settings.update(dim=4, layers=1, spread=4)

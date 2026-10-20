@@ -38,7 +38,7 @@ from .records import (
 if TYPE_CHECKING:
     import mlx.core as mx
 
-    from .main import Model
+    from .model import Model
 
 
 def _input_files(pattern: str | PathLike[str]) -> list[str]:
