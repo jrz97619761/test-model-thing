@@ -23,7 +23,7 @@ Feel free to fork the training and benchmark code (everything is under MIT). I r
 
 For reproduction purposes, the dataset I trained my model on is ```simplewiki-20260801-pages-articles.xml.bz2```, from the Wikipedia dumps. The 4.5m model has ```dim = 512``` and ```layers = 16```.
 
-Below is ```--frozen``` mode output (now ```tmt generate```) after training a model for 5 minutes (you could train it for much longer, feel free to send in the results as a GitHub issue).
+Below is ```tmt generate``` output after training a model for 5 minutes (you could train it for much longer, feel free to send in the results as a GitHub issue).
 
 <img width="1127" height="634" alt="Screenshot 2026-09-19 at 4 53 44 PM" src="https://github.com/user-attachments/assets/ca1553de-0248-4f6d-a67d-2f6e30938d9e" />
 
@@ -46,8 +46,7 @@ tmt --version
 ```
 
 Activation adds `.venv/bin` to PATH for this terminal.
-Developers can use `python -m pip install -e '.[test]'` so source edits take effect directly and pytest and the ruff linter are available.
-Run `ruff check src test` to lint the code. The rules are in `pyproject.toml`.
+Developers can use `python -m pip install -e '.[test]'` so source edits take effect directly and pytest is available.
 `python -m tmt` also runs the CLI.
 The version uses installed package metadata.
 
@@ -77,11 +76,3 @@ The trainer saves every 500 updates by default (set this with `--save-every`) an
 Read the [command manual](src/tmt/commands.md) or use `tmt help`.
 Use [train](src/tmt/commands.md#train) for run and resume options.
 The tiny example checks commands. It does not establish model quality.
-
-## A graphical view (partially outdated)
-
-_I'm probably going to redo this in Manim or similar software sometime soon. Expect this part to change significantly soon_
-
-Below is an approximate flow chart of the model architecture, made in Apple's Freeform app (excluding the wrapper for dataset cleaning and input/output handling) for reference. Note that the arrow connecting the target latent to the CE loss should instead be the target byte to the CE loss.
-
-<img width="1653" height="1161" alt="JEPA thing" src="https://github.com/user-attachments/assets/2d3a34ff-ba6a-44b8-b361-6c73da9216c0" />

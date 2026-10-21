@@ -1,7 +1,5 @@
 import json
 import math
-import subprocess
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -404,19 +402,13 @@ def test_run_rejects_bad_inputs_before_model_work(
     ],
     ids=['bad-row', 'invalid-seed'],
 )
-def test_benchmark_entry_points(tmp_path, args, code, error):
+def test_benchmark_entry_points(tmp_path, run_subprocess, args, code, error):
     (tmp_path / 'cola.tsv').write_text(
         'src\t1\tx\talpha\nsrc\t0\tx\tbeta\nsrc\t1\tx\n', encoding='utf-8'
     )
 
     def run(*command):
-        result = subprocess.run(
-            [sys.executable, *command, *args],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        result = run_subprocess(*command, *args)
         return result.returncode, result.stdout, result.stderr
 
     returncode, stdout, stderr = run('-m', 'tmt', 'benchmark')
@@ -428,7 +420,7 @@ def test_benchmark_entry_points(tmp_path, args, code, error):
     assert stdout == ''
 
 
-def test_module_alias_reports_interrupt(tmp_path):
+def test_module_alias_reports_interrupt(run_subprocess):
     import signal
 
     script = """
@@ -442,13 +434,7 @@ tmt.checkpoint.load_checkpoint = interrupt
 sys.argv = ['tmt.benchmark', 'missing.safetensors', '--seed', '11']
 runpy.run_module('tmt.benchmark', run_name='__main__', alter_sys=True)
 """
-    result = subprocess.run(
-        [sys.executable, '-c', script],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    result = run_subprocess(script=script)
     assert result.returncode == -signal.SIGINT, result.stderr
     assert 'Traceback' not in result.stderr
     assert result.stderr.splitlines()[-1] == 'tmt: interrupted'

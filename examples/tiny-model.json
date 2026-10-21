@@ -2,7 +2,7 @@
   "dim": 4,
   "layers": 1,
   "spread": 4,
-  "block": "rtu",
+  "block": "tmt-v0",
   "temp": 0.75,
   "rate": 0.0005,
   "bound": [

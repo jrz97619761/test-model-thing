@@ -15,7 +15,7 @@ A sweep requires its base seed even when the grid has a `seed` field. Each grid 
 
 Relative paths use the current directory. The CLI does not search parent folders for files or runs. Data globs select raw files. The CLI sorts paths that match. Each file is one document, and the model resets at each document boundary. The CLI reads file contents as bytes, adds no separators, and does not decode them as text.
 
-The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, `bound`, and `block`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, `[40000, 120000]`, and `"rtu"`. The package registers only the `rtu` block. The optimizer uses `rate` as the weight update rate. `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss.
+The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, `bound`, and `block`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, `[40000, 120000]`, and `"tmt-v0"`. The package registers only the `tmt-v0` block. The optimizer uses `rate` as the weight update rate. `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss.
 
 `tmt.config.MODEL_DEFAULTS` supplies these defaults. `load_config()` resolves partial JSON configurations.
 Direct Python calls to `Model` require all seven settings. For example:
@@ -65,8 +65,8 @@ For local development, use `python -m pip install -e '.[test]'`. This installs p
 
 ## Blocks
 
-The `block` field selects one factory for every layer. The current package registers only `rtu`.
-Use `"block": "rtu"` for the default block, or replace `rtu` with a factory name from `src/tmt/blocks.py`.
+The `block` field selects one factory for every layer. The current package registers only `tmt-v0`.
+Use `"block": "tmt-v0"` for the default block, or replace `tmt-v0` with a factory name from `src/tmt/blocks.py`.
 A custom block needs a local factory entry in `src/tmt/blocks.py`.
 
 The Python method `Model.step()` returns `((x, state_results, auxiliary_results), (logits, stop))`.
@@ -79,7 +79,7 @@ It returns `(x_next, next_state, aux)`. `x_next` has shape `[dim]` and keeps the
 `next_state` is a dictionary with exactly the field names in `state_fields`.
 
 `Block` exposes `state_fields`, `trace_fields`, `temporal_gradient`, and `feature_source` as properties without setters.
-The allowed `temporal_gradient` values are `one-step-autodiff` and `rtu-v1`.
+The allowed `temporal_gradient` values are `one-step-autodiff` and `tmt-v0`.
 The allowed `feature_source` values are `final-output` and `recurrent-state`.
 Override these getters in a custom block. For example:
 
@@ -99,7 +99,7 @@ All block parameters stay in the normal MLX parameter tree.
 Block state shapes stay fixed for the life of the model.
 
 `reset()` clears state and traces at each document boundary. `probe()` returns an auxiliary value for differentiation.
-The default probe is an unused scalar. RTU returns a zero vector with shape `[dim]`.
+The default probe is an unused scalar. TMT-v0 returns a zero vector with shape `[dim]`.
 The `adjust_gradients()` hook receives the byte, candidate state, auxiliary data, probe cotangent, and local gradients.
 The hook returns `(grads, encoder_addition, traces)`.
 
@@ -107,7 +107,7 @@ The default hook returns autodiff gradients unchanged, no encoder gradient addit
 
 An empty trace dictionary leaves traces unchanged. A trace update must contain every name in `trace_fields`.
 
-The RTU hook uses label `rtu-v1`. It adds the prior temporal trace contributions for block decay and the shared encoder.
+The TMT-v0 hook uses label `tmt-v0`. It adds the prior temporal trace contributions for block decay and the shared encoder.
 The default label is `one-step-autodiff`. It covers gradients within one byte step.
 It does not propagate gradients through detached byte history.
 
@@ -123,7 +123,7 @@ The model applies snapshot, restore, and evaluation across all blocks.
 Evaluation and samples restore state after success or error.
 
 `features(x)` returns one `[dim]` vector for CoLA. The `feature_source` property reports `final-output` when the block uses `x`.
-RTU uses its recurrent state and reports `recurrent-state`.
+TMT-v0 uses its recurrent state and reports `recurrent-state`.
 The CoLA result uses the JSON key `feature_source`.
 
 Resolved model config and checkpoint metadata both contain `block`.
@@ -160,9 +160,9 @@ tmt init --output configs/model.json
 ```
 
 ### Behavior and files
-Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the configuration defaults, with `"block": "rtu"`. Edit it before a real experiment. The run template sets `sample` and `evaluation` to `null`.
+Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the configuration defaults, with `"block": "tmt-v0"`. Edit it before a real experiment. The run template sets `sample` and `evaluation` to `null`.
 
-`grid.json` has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, `block=["rtu"]`, and `seed=[11,22]`. `run.example.json` shows the manifest fields with an empty file list. It has null values for `started_at`, `trainable_parameters`, and `temporal_gradient`. It is a template, not a run record. The command opens each JSON destination in exclusive-create mode. If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
+`grid.json` has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, `block=["tmt-v0"]`, and `seed=[11,22]`. `run.example.json` shows the manifest fields with an empty file list. It has null values for `started_at`, `trainable_parameters`, and `temporal_gradient`. It is a template, not a run record. The command opens each JSON destination in exclusive-create mode. If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
 
 The `--output` form creates parent folders as needed. It writes only the model config and does not create workspace folders.
 
@@ -333,12 +333,12 @@ The CLI visits value combinations in the key and value order from the JSON file.
 
 Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same manifest fields as a standalone train invocation. Its loss rows are in `run-NNNN/manifest/loss.jsonl`. Sample and interval-evaluation files also stay in each candidate folder. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `trainable_parameters`, `temporal_gradient`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
 
-The package registers only `rtu`. To compare it with a custom block, add a factory to `src/tmt/blocks.py` first.
+The package registers only `tmt-v0`. To compare it with a custom block, add a factory to `src/tmt/blocks.py` first.
 Then add the block names and paired seeds to the grid. Keep the base config, data, objective, optimizer settings, and update budget fixed.
 
 ```json
 {
-  "block": ["rtu", "candidate-v1"],
+  "block": ["tmt-v0", "candidate-v1"],
   "seed": [11, 22, 33]
 }
 ```
@@ -440,7 +440,7 @@ The loader ignores blank lines and preserves sentence whitespace. TSV row number
 
 The split is contiguous. The model weights stay frozen, and only a separate linear classification head receives updates. The command reports train and held-out confusion counts with MCC multiplied by 100. The score range is -100 to 100.
 
-RTU uses recurrent-state features. Other blocks use final-output features by default.
+TMT-v0 uses recurrent-state features. Other blocks use final-output features by default.
 The benchmark reports the JSON key `feature_source` as `recurrent-state` or `final-output` with the CoLA scores.
 The `epoch_scores` key contains the CoLA scores for each epoch. Without CoLA, this list is empty.
 

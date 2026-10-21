@@ -132,9 +132,37 @@ def workspace(tmp_path, monkeypatch, tiny_settings):
 
 
 @pytest.fixture
-def cli(tmp_path):
-    import os
+def run_subprocess(tmp_path):
+    """Run Python code or a command and capture its text output."""
     import subprocess
+    import sys
+
+    def run(
+        *args,
+        script=None,
+        executable=sys.executable,
+        cwd=tmp_path,
+        env=None,
+        timeout=60,
+    ):
+        command = [executable]
+        if script is not None:
+            command.extend(['-c', script])
+        return subprocess.run(
+            [*command, *args],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    return run
+
+
+@pytest.fixture
+def cli(run_subprocess):
+    import os
     import sysconfig
 
     env = dict(os.environ)
@@ -142,14 +170,7 @@ def cli(tmp_path):
     command = str(Path(sysconfig.get_path('scripts')) / 'tmt')
 
     def run(*args, code=0):
-        result = subprocess.run(
-            [command, *args],
-            cwd=tmp_path,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        result = run_subprocess(*args, executable=command, env=env)
         assert result.returncode == code, result.stderr
         assert 'Traceback' not in result.stderr
         return result
@@ -158,10 +179,7 @@ def cli(tmp_path):
 
 
 @pytest.fixture
-def model_free_cli(tmp_path):
-    import subprocess
-    import sys
-
+def model_free_cli(run_subprocess):
     script = """
 import builtins, runpy, sys
 original = builtins.__import__
@@ -174,12 +192,6 @@ runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)
 """
 
     def run(*args, module='tmt'):
-        return subprocess.run(
-            [sys.executable, '-c', script, module, *args],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        return run_subprocess(module, *args, script=script, timeout=10)
 
     return run

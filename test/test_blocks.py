@@ -3,7 +3,7 @@ import mlx.nn as nn
 import pytest
 from mlx.utils import tree_flatten
 
-from tmt.blocks import BLOCKS, Block, RTUBlock
+from tmt.blocks import BLOCKS, Block, TMTv0Block
 from tmt.model import Model
 
 
@@ -74,15 +74,15 @@ def make_model(tiny_settings):
     [
         (Block, ((), (), 'one-step-autodiff', 'final-output')),
         (
-            RTUBlock,
-            (('states',), ('decaytrace', 'embedtrace'), 'rtu-v1', 'recurrent-state'),
+            TMTv0Block,
+            (('states',), ('decaytrace', 'embedtrace'), 'tmt-v0', 'recurrent-state'),
         ),
         (
             MatrixCache,
             (('matrix', 'cache'), ('history',), 'one-step-autodiff', 'final-output'),
         ),
     ],
-    ids=['base', 'rtu', 'custom-block'],
+    ids=['base', 'tmt-v0', 'custom-block'],
 )
 def test_block_contract_properties(block_type, expected):
     block = Block() if block_type is Block else block_type(4, 4)
@@ -123,29 +123,30 @@ def test_invalid_block_labels(monkeypatch, tiny_settings, field, value):
 
 @pytest.mark.parametrize('operation', ['commit', 'restore', 'result'])
 def test_layer_value_validation_is_lazy(operation):
-    layer = RTUBlock(4, 4)
+    layer = TMTv0Block(4, 4)
     assert layer._runtime_schema is None
 
     def check():
-        if operation == 'commit':
-            layer.commit_state({'states': mx.zeros((2,))})
-        elif operation == 'restore':
-            saved = {
-                'states': mx.zeros((2,)),
-                'decaytrace': mx.zeros_like(layer.decaytrace),
-                'embedtrace': mx.zeros_like(layer.embedtrace),
-            }
-            layer.restore_state(saved)
-        else:
-            enc, output = mx.zeros((4,)), mx.zeros((4,))
-            layer.validate_result(enc, output, {'states': mx.zeros((2,))})
+        match operation:
+            case 'commit':
+                layer.commit_state({'states': mx.zeros((2,))})
+            case 'restore':
+                saved = {
+                    'states': mx.zeros((2,)),
+                    'decaytrace': mx.zeros_like(layer.decaytrace),
+                    'embedtrace': mx.zeros_like(layer.embedtrace),
+                }
+                layer.restore_state(saved)
+            case _:
+                enc, output = mx.zeros((4,)), mx.zeros((4,))
+                layer.validate_result(enc, output, {'states': mx.zeros((2,))})
 
     with pytest.raises(ValueError, match='retain shape'):
         check()
     assert layer._runtime_schema is not None
 
 
-@pytest.mark.parametrize('block', ['rtu', 'matrix-test', 'empty-test'])
+@pytest.mark.parametrize('block', ['tmt-v0', 'matrix-test', 'empty-test'])
 def test_training_updates_parameters_and_optimizer(
     block, monkeypatch, make_model, snapshot
 ):
@@ -194,11 +195,11 @@ def test_training_updates_parameters_and_optimizer(
     )
 
 
-@pytest.mark.parametrize('block', ['rtu', 'matrix-test', 'empty-test'])
+@pytest.mark.parametrize('block', ['tmt-v0', 'matrix-test', 'empty-test'])
 def test_frozen_step_and_reset(block, make_model, snapshot):
     model = make_model(block)
     model.train_step(65, 66, False)
-    if block == 'rtu':
+    if block == 'tmt-v0':
         assert mx.sum(model.blocks[0].embedtrace[65]).item() > 0.0
     fields = {name for layer in model.blocks for name in layer.state_fields}
     saved = model.snapshot_state()
@@ -229,7 +230,7 @@ def test_frozen_step_and_reset(block, make_model, snapshot):
     assert mx.array_equal(first, again).item()
 
 
-@pytest.mark.parametrize('block', ['rtu', 'matrix-test'])
+@pytest.mark.parametrize('block', ['tmt-v0', 'matrix-test'])
 def test_evaluation_restores_state(block, monkeypatch, make_model, snapshot):
     from tmt import benchmark
 
@@ -250,7 +251,7 @@ def test_evaluation_restores_state(block, monkeypatch, make_model, snapshot):
     assert snapshot(model) == before
 
 
-@pytest.mark.parametrize('block', ['rtu', 'matrix-test'])
+@pytest.mark.parametrize('block', ['tmt-v0', 'matrix-test'])
 def test_training_sample_restores_state_and_rng(
     block, monkeypatch, make_model, snapshot
 ):
@@ -312,8 +313,8 @@ def test_training_sample_restores_state_and_rng(
 
 @pytest.mark.parametrize(
     ('block', 'convention'),
-    [('rtu', 'recurrent-state'), ('matrix-test', 'final-output')],
-    ids=['rtu', 'matrix-test'],
+    [('tmt-v0', 'recurrent-state'), ('matrix-test', 'final-output')],
+    ids=['tmt-v0', 'matrix-test'],
 )
 def test_checkpoint_round_trip(block, convention, tmp_path, tiny_settings, snapshot):
     from tmt.benchmark import rollout
@@ -370,14 +371,15 @@ def test_invalid_forward_results(monkeypatch, fault, tiny_settings):
     class Invalid(MatrixCache):
         def __call__(self, enc, x, probe):
             output, state, aux = super().__call__(enc, x, probe)
-            if fault == 'missing':
-                state.pop('cache')
-            elif fault == 'shape':
-                state['matrix'] = enc
-            elif fault == 'dtype':
-                state['cache'] = state['cache'].astype(mx.float16)
-            else:
-                output = output[None, :]
+            match fault:
+                case 'missing':
+                    state.pop('cache')
+                case 'shape':
+                    state['matrix'] = enc
+                case 'dtype':
+                    state['cache'] = state['cache'].astype(mx.float16)
+                case _:
+                    output = output[None, :]
             return output, state, aux
 
     monkeypatch.setitem(BLOCKS, 'invalid-test', Invalid)
@@ -402,18 +404,19 @@ def test_invalid_gradient_hooks(monkeypatch, forbid_call, fault, tiny_settings):
     class Invalid(MatrixCache):
         def adjust_gradients(self, byte, next_state, aux, probe_grad, grads):
             encoder, traces = None, {}
-            if fault == 'missing':
-                grads['proj'].pop('weight')
-            elif fault == 'shape':
-                grads['proj']['weight'] = mx.zeros((1,))
-            elif fault == 'dtype':
-                grads['proj']['weight'] = grads['proj']['weight'].astype(mx.float16)
-            elif fault == 'nonarray':
-                grads['proj']['weight'] = None
-            elif fault == 'encoder':
-                encoder = mx.zeros((1,))
-            else:
-                traces = {'history': mx.zeros((2,))}
+            match fault:
+                case 'missing':
+                    grads['proj'].pop('weight')
+                case 'shape':
+                    grads['proj']['weight'] = mx.zeros((1,))
+                case 'dtype':
+                    grads['proj']['weight'] = grads['proj']['weight'].astype(mx.float16)
+                case 'nonarray':
+                    grads['proj']['weight'] = None
+                case 'encoder':
+                    encoder = mx.zeros((1,))
+                case _:
+                    traces = {'history': mx.zeros((2,))}
             return grads, encoder, traces
 
     monkeypatch.setitem(BLOCKS, 'invalid-test', Invalid)

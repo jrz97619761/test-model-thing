@@ -15,7 +15,7 @@ MODEL_DEFAULTS: dict[str, Any] = {
     'temp': 0.75,
     'rate': 0.0005,
     'bound': (40000, 120000),
-    'block': 'rtu',
+    'block': 'tmt-v0',
 }
 
 

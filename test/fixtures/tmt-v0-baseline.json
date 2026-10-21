@@ -1,6 +1,6 @@
 {
   "config": {
-    "block": "rtu",
+    "block": "tmt-v0",
     "bound": [
       40000,
       120000
@@ -11,7 +11,7 @@
     "spread": 4,
     "temp": 0.75
   },
-  "description": "Seeded dim=4, layers=2 RTU implementation baseline. Stable contracts are checked separately.",
+  "description": "Seeded dim=4, layers=2 TMT-v0 implementation baseline. Stable contracts are checked separately.",
   "output_indices": [
     65,
     66,

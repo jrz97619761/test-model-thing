@@ -2,13 +2,11 @@ import json
 import math
 import os
 import random
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-FIXTURE = Path(__file__).parent / 'fixtures' / 'rtu-baseline.json'
+FIXTURE = Path(__file__).parent / 'fixtures' / 'tmt-v0-baseline.json'
 
 
 def _array_values(array):
@@ -35,7 +33,7 @@ def _gradient_summary(array):
     }
 
 
-def capture_rtu_baseline(config, seed, steps, output_indices, state_rows):
+def capture_tmt_v0_baseline(config, seed, steps, output_indices, state_rows):
     import mlx.core as mx
 
     from tmt.model import Model
@@ -95,7 +93,7 @@ def capture_rtu_baseline(config, seed, steps, output_indices, state_rows):
     return updates
 
 
-def test_import_has_no_actions():
+def test_import_has_no_actions(run_subprocess):
     root = Path(__file__).resolve().parents[1]
     code = """
 import argparse, builtins
@@ -105,9 +103,7 @@ builtins.input = blocked
 argparse.ArgumentParser = blocked
 import tmt.model
 """
-    result = subprocess.run(
-        [sys.executable, '-c', code], cwd=root, capture_output=True, text=True
-    )
+    result = run_subprocess(script=code, cwd=root)
     assert result.returncode == 0, result.stderr
 
 
@@ -140,39 +136,42 @@ def test_train_step(monkeypatch, model_factory):
     assert int(model.optimizer.state['step'].item()) == 2
 
 
-def test_rtu_baseline():
-    """Compare seeded RTU updates with the saved fixture.
+def test_tmt_v0_baseline():
+    """Compare seeded TMT-v0 updates with the saved fixture.
 
-    After an intentional RTU change, rewrite the fixture and review it:
-        TMT_RECORD_RTU_BASELINE=1 python -m pytest test/test_model.py -k rtu_baseline
-        git diff test/fixtures/rtu-baseline.json
+    After an intentional TMT-v0 change, rewrite the fixture and review it:
+        TMT_RECORD_TMT_V0_BASELINE=1 python -m pytest test/test_model.py -k baseline
+        git diff test/fixtures/tmt-v0-baseline.json
     """
     fixture = json.loads(FIXTURE.read_text())
     keys = ('config', 'seed', 'steps', 'output_indices', 'state_rows')
-    actual_updates = capture_rtu_baseline(*(fixture[key] for key in keys))
-    if os.environ.get('TMT_RECORD_RTU_BASELINE') == '1':
+    actual_updates = capture_tmt_v0_baseline(*(fixture[key] for key in keys))
+    if os.environ.get('TMT_RECORD_TMT_V0_BASELINE') == '1':
         FIXTURE.write_text(
             json.dumps({**fixture, 'updates': actual_updates}, indent=2) + '\n'
         )
-        pytest.skip('recorded a new RTU baseline')
+        pytest.skip('recorded a new TMT-v0 baseline')
 
     def assert_reference(actual, expected, path='fixture'):
-        if isinstance(expected, dict):
-            assert actual.keys() == expected.keys(), (
-                f'{path}: got fields {list(actual)}, expected {list(expected)}'
-            )
-            for key in expected:
-                assert_reference(actual[key], expected[key], f'{path}.{key}')
-        elif isinstance(expected, list):
-            assert len(actual) == len(expected), path
-            for index, (actual_item, expected_item) in enumerate(zip(actual, expected)):
-                assert_reference(actual_item, expected_item, f'{path}[{index}]')
-        elif isinstance(expected, bool):
-            assert actual is expected, path
-        elif isinstance(expected, (int, str)):
-            assert actual == expected, path
-        else:
-            assert math.isclose(actual, expected, rel_tol=1e-5, abs_tol=1e-6), path
+        match expected:
+            case dict():
+                assert actual.keys() == expected.keys(), (
+                    f'{path}: got fields {list(actual)}, expected {list(expected)}'
+                )
+                for key in expected:
+                    assert_reference(actual[key], expected[key], f'{path}.{key}')
+            case list():
+                assert len(actual) == len(expected), path
+                for index, (actual_item, expected_item) in enumerate(
+                    zip(actual, expected)
+                ):
+                    assert_reference(actual_item, expected_item, f'{path}[{index}]')
+            case bool():
+                assert actual is expected, path
+            case int() | str():
+                assert actual == expected, path
+            case _:
+                assert math.isclose(actual, expected, rel_tol=1e-5, abs_tol=1e-6), path
 
     assert_reference(actual_updates, fixture['updates'])
 
@@ -260,7 +259,7 @@ def test_loss(loss_case, target, end, ce_only):
         assert float(components[name]) == pytest.approx(value, rel=0, abs=1e-5), name
 
 
-def test_rtu_gradients(monkeypatch):
+def test_tmt_v0_gradients(monkeypatch):
     import mlx.core as mx
 
     from tmt.config import load_config
@@ -303,7 +302,7 @@ def test_rtu_gradients(monkeypatch):
         ('embedtrace', expected_embedtrace),
     ):
         assert mx.allclose(getattr(layer, field), expected_trace, atol=1e-06).item(), (
-            f'{field} does not match the RTU recurrence'
+            f'{field} does not match the TMT-v0 recurrence'
         )
 
     epsilon = 0.01

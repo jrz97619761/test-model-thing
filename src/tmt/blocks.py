@@ -1,4 +1,4 @@
-"""Byte-step block contract, the RTU block, and the block registry."""
+"""Byte-step block contract, the TMT-v0 block, and the block registry."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from mlx.utils import tree_flatten
 from . import validation
 
 type FeatureSource = Literal['final-output', 'recurrent-state']
-type TemporalGradient = Literal['one-step-autodiff', 'rtu-v1']
+type TemporalGradient = Literal['one-step-autodiff', 'tmt-v0']
 type GradientValue = mx.array | dict[str, GradientValue] | list[GradientValue]
 type GradientTree = dict[str, GradientValue]
 type RuntimeSchema = tuple[tuple[str, tuple[int, ...], mx.Dtype], ...]
@@ -115,7 +115,7 @@ class Block(nn.Module):
         )
 
 
-class RTUBlock(Block):
+class TMTv0Block(Block):
     @property
     def state_fields(self) -> tuple[str, ...]:
         return ('states',)
@@ -126,7 +126,7 @@ class RTUBlock(Block):
 
     @property
     def temporal_gradient(self) -> TemporalGradient:
-        return 'rtu-v1'
+        return 'tmt-v0'
 
     @property
     def feature_source(self) -> FeatureSource:
@@ -179,4 +179,4 @@ class RTUBlock(Block):
         return self.states
 
 
-BLOCKS = {'rtu': RTUBlock}
+BLOCKS = {'tmt-v0': TMTv0Block}

@@ -312,7 +312,7 @@ def block_runtime_schema(
         'block state and trace fields must be distinct public names in tuples',
     )
     for label, allowed in (
-        ('temporal_gradient', ('one-step-autodiff', 'rtu-v1')),
+        ('temporal_gradient', ('one-step-autodiff', 'tmt-v0')),
         ('feature_source', ('final-output', 'recurrent-state')),
     ):
         value = getattr(block, label)

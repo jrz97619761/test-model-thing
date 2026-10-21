@@ -443,7 +443,7 @@ def _run_init(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
                 'dim': [4, 8],
                 'layers': [1],
                 'spread': [4],
-                'block': ['rtu'],
+                'block': ['tmt-v0'],
                 'seed': [11, 22],
             },
             'run.example.json': example_run,

@@ -11,7 +11,7 @@ All package paths below are relative to `src/tmt/`.
 | File | Responsibility |
 | --- | --- |
 | `model.py` | `Encoder`, `Decoder`, `Model`, objective loss, optimizer updates, and byte samples |
-| `blocks.py` | `Block`, the `RTUBlock`, block registry, recurrent state, and gradient traces |
+| `blocks.py` | `Block`, the `TMTv0Block`, block registry, recurrent state, and gradient traces |
 | `config.py` | `MODEL_DEFAULTS` and partial JSON configuration through `load_config()` |
 | `validation.py` | Input checks, checkpoint metadata and tensor checks, and block contracts |
 | `checkpoint.py` | Seeded model creation and Safetensors save/load |
@@ -52,12 +52,12 @@ python -m pip install -e '.[test]'
 ```
 
 The editable installation supports imports from the `src/` layout and CLI subprocess tests.
-The `test` extra supplies pytest and ruff. `pyproject.toml` contains the ruff rules. Use the selected environment for all checks.
+The `test` extra supplies pytest. Use the selected environment for all checks.
+Type checking and linting are optional local checks. Contributors choose their own tools.
 
 For code changes, run these commands from the repository root:
 
 ```sh
-ruff check src test
 python -m pytest
 python -m tmt --help
 python -m tmt --version
@@ -74,7 +74,7 @@ The tests are in `test/`:
 
 | File | Coverage |
 | --- | --- |
-| `test_model.py` | Loss, gradients, recurrence, import behavior, and the fixed RTU baseline |
+| `test_model.py` | Loss, gradients, recurrence, import behavior, and the fixed TMT-v0 baseline |
 | `test_blocks.py` | Block contracts, state, gradient hooks, features, and checkpoint round trips |
 | `test_benchmark.py` | Byte scores, CoLA input and output, and benchmark entry points |
 | `test_config.py` | Configuration, templates, checkpoint validation, atomic saves, and RNG preservation |
@@ -82,8 +82,9 @@ The tests are in `test/`:
 | `test_train.py` | Train updates, resume, manifests, samples, evaluation intervals, and sweeps |
 
 `test/conftest.py` supplies shared fixtures.
+Use `run_subprocess` for child Python scripts, module commands, and installed-command checks.
 Tests import helpers from the module that defines them. `tmt.cli` exports CLI entry points only.
-`test/fixtures/rtu-baseline.json` records seeded numerical results.
+`test/fixtures/tmt-v0-baseline.json` records seeded numerical results.
 Do not regenerate the baseline only to hide a regression. Review any intentional baseline change.
 
 ## Model and evaluation contracts
@@ -94,7 +95,7 @@ Do not regenerate the baseline only to hide a regression. Review any intentional
 - Keep imports free of prompts, model runs, and file writes.
 - Preserve help and version commands without MLX imports. Inspect the imports in CLI dependencies as well as `cli.py`.
 - Keep `train_step()` free of samples and sample RNG changes. `Model.__call__()` also samples, so these methods are not interchangeable.
-- Preserve RTU gradient contributions and the distinction between recurrent state and gradient traces.
+- Preserve TMT-v0 gradient contributions and the distinction between recurrent state and gradient traces.
 - A frozen step advances recurrent state without optimizer updates or trace updates.
 - Preserve state and trace restoration in `benchmark.evaluate()` and `runtime._training_sample()` after success or failure.
 - Review MLX evaluation boundaries, `stop_gradient`, and compiled optimizer state when arithmetic changes.

@@ -715,7 +715,7 @@ def test_sweep_failure_records_status(
     grid.write_text('{"seed": [11, 22]}')
     data.write_bytes(b'ab')
     output = tmp_path / 'sweep'
-    completed_model = SimpleNamespace(count=lambda: 7, temporal_gradient=['rtu-v1'])
+    completed_model = SimpleNamespace(count=lambda: 7, temporal_gradient=['tmt-v0'])
     outcomes = iter([completed_model, error_type('injected failure')])
 
     def next_train(*args, **kwargs):
@@ -739,7 +739,7 @@ def test_sweep_failure_records_status(
     rows = (output / 'results.jsonl').read_bytes()
     first_row = json.loads(rows.splitlines()[0])
     assert first_row['trainable_parameters'] == 7
-    assert first_row['temporal_gradient'] == ['rtu-v1']
+    assert first_row['temporal_gradient'] == ['tmt-v0']
     with pytest.raises(FileExistsError, match='choose a new output folder'):
         sweep(grid, str(data), str(data), output, config, updates=1, seed=11)
     assert (output / 'results.jsonl').read_bytes() == rows
@@ -784,7 +784,7 @@ def test_sweep_runs_grid(
     from tmt.runtime import sweep
 
     grid, config = tmp_path / 'grid.json', tmp_path / 'model.json'
-    grid.write_text(json.dumps({'block': ['rtu', 'rtu-test'], 'seed': [11, 22]}))
+    grid.write_text(json.dumps({'block': ['tmt-v0', 'tmt-v0-test'], 'seed': [11, 22]}))
     config.write_text(json.dumps(tiny_settings))
     training, development = tmp_path / 'train.bin', tmp_path / 'development.bin'
     training.write_bytes(b'\x00\x01\x02')
@@ -799,17 +799,17 @@ def test_sweep_runs_grid(
         'eval_every': 2,
         'eval_max_bytes': 3,
     }
-    monkeypatch.setitem(BLOCKS, 'rtu-test', BLOCKS['rtu'])
+    monkeypatch.setitem(BLOCKS, 'tmt-v0-test', BLOCKS['tmt-v0'])
     best = sweep(
         grid, str(training), str(development), output, config, 2, 11, **options
     )
 
     rows = jsonl(output / 'results.jsonl')
     assert [(row['settings']['block'], row['seed']) for row in rows] == [
-        ('rtu', 11),
-        ('rtu', 22),
-        ('rtu-test', 11),
-        ('rtu-test', 22),
+        ('tmt-v0', 11),
+        ('tmt-v0', 22),
+        ('tmt-v0-test', 11),
+        ('tmt-v0-test', 22),
     ], 'sweep changed product order or per-axis seeds'
     assert best == min(rows, key=lambda row: row['development_bpb'])
     assert json.dumps(best) in capsys.readouterr().out, 'best row was not reported'
@@ -819,7 +819,7 @@ def test_sweep_runs_grid(
         assert checkpoint.parent.name == f'run-{index:04d}'
         assert row['objective'] == 'tmt'
         assert row['development_targets'] == 3
-        assert row['temporal_gradient'] == ['rtu-v1']
+        assert row['temporal_gradient'] == ['tmt-v0']
         assert row['trainable_parameters'] > 0
         assert json.loads((folder / 'model.json').read_text()) == row['settings']
         manifest = json.loads((folder / 'run.json').read_text())

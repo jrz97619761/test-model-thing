@@ -114,7 +114,7 @@ def test_load_config(tmp_path, monkeypatch):
         for parameter in parameters.values()
     ), 'direct Model constructor fields must remain required'
     with pytest.raises(TypeError, match='required positional arguments'):
-        Model(dim=4, layers=1, spread=4, block='rtu')
+        Model(dim=4, layers=1, spread=4, block='tmt-v0')
     with pytest.raises(ValueError, match='unknown block'):
         Model(
             **{**defaults, 'dim': 4, 'layers': 1, 'spread': 4, 'block': 'unknown-block'}
@@ -227,7 +227,7 @@ def test_init_writes_templates(run_cli, tmp_path, manifest_fields):
         'dim': [4, 8],
         'layers': [1],
         'spread': [4],
-        'block': ['rtu'],
+        'block': ['tmt-v0'],
         'seed': [11, 22],
     }
     assert json.loads((tmp_path / 'grid.json').read_text()) == grid
@@ -288,35 +288,36 @@ def test_checkpoint_rejects_invalid_files(checkpoint, fault, parts):
 
     path, arrays = checkpoint.path, dict(checkpoint.arrays)
     header, tmt, raw = json.loads(checkpoint.metadata['tmt']), None, None
-    if fault == 'missing-tensor':
-        del arrays[parts[0]]
-    elif fault == 'extra-tensor':
-        arrays[parts[0]] = arrays['m.decoder.stop.bias']
-    elif fault == 'wrong-shape':
-        name = 'm.' + parts[0]
-        arrays[name] = mx.zeros((1,), dtype=arrays[name].dtype)
-    elif fault == 'wrong-dtype':
-        name = 'o.' + parts[0]
-        arrays[name] = mx.zeros(arrays[name].shape, dtype=mx.int32)
-    elif fault in ('missing-spread', 'missing-block'):
-        header['model'].pop(parts[0])
-    elif fault == 'unknown-block':
-        header['model']['block'] = 'unknown'
-    elif fault == 'invalid-version':
-        header['version'] = True
-    elif fault == 'metadata-json':
-        tmt = 'x'
-    elif fault == 'header-length':
-        raw = (8).to_bytes(8, 'little') + b'{}'
-    elif fault == 'header-not-json':
-        raw = (2).to_bytes(8, 'little') + b'{x'
-    elif fault == 'header-empty-object':
-        raw = (2).to_bytes(8, 'little') + b'{}'
-    elif fault == 'no-tensors':
-        body = b'{"__metadata__": {"tmt": "x"}}'
-        raw = len(body).to_bytes(8, 'little') + body
-    elif fault == 'truncated-data':
-        raw = path.read_bytes()[:-16]
+    match fault:
+        case 'missing-tensor':
+            del arrays[parts[0]]
+        case 'extra-tensor':
+            arrays[parts[0]] = arrays['m.decoder.stop.bias']
+        case 'wrong-shape':
+            name = 'm.' + parts[0]
+            arrays[name] = mx.zeros((1,), dtype=arrays[name].dtype)
+        case 'wrong-dtype':
+            name = 'o.' + parts[0]
+            arrays[name] = mx.zeros(arrays[name].shape, dtype=mx.int32)
+        case 'missing-spread' | 'missing-block':
+            header['model'].pop(parts[0])
+        case 'unknown-block':
+            header['model']['block'] = 'unknown'
+        case 'invalid-version':
+            header['version'] = True
+        case 'metadata-json':
+            tmt = 'x'
+        case 'header-length':
+            raw = (8).to_bytes(8, 'little') + b'{}'
+        case 'header-not-json':
+            raw = (2).to_bytes(8, 'little') + b'{x'
+        case 'header-empty-object':
+            raw = (2).to_bytes(8, 'little') + b'{}'
+        case 'no-tensors':
+            body = b'{"__metadata__": {"tmt": "x"}}'
+            raw = len(body).to_bytes(8, 'little') + body
+        case 'truncated-data':
+            raw = path.read_bytes()[:-16]
     if raw is not None:
         path.write_bytes(raw)
     else:
@@ -351,12 +352,13 @@ def test_checkpoint_failure_preserves_destination(
     def fail(*args, **kwargs):
         raise error('injected checkpoint failure')
 
-    if failure in ('write', 'interrupt'):
-        monkeypatch.setattr(mx, 'save_safetensors', fail_write)
-    else:
-        monkeypatch.setattr(
-            storage.os, 'fsync' if failure == 'sync' else 'replace', fail
-        )
+    match failure:
+        case 'write' | 'interrupt':
+            monkeypatch.setattr(mx, 'save_safetensors', fail_write)
+        case 'sync':
+            monkeypatch.setattr(storage.os, 'fsync', fail)
+        case _:
+            monkeypatch.setattr(storage.os, 'replace', fail)
 
     with pytest.raises(error):
         storage.save_checkpoint(path, checkpoint.model, checkpoint.settings)
@@ -415,24 +417,25 @@ def test_checkpoint_load_preserves_rng(monkeypatch, checkpoint, failure):
 
     from tmt import checkpoint as storage
 
-    if failure == 'constructor':
-        create = storage.new_model
+    match failure:
+        case 'constructor':
+            create = storage.new_model
 
-        def fail(settings, seed):
-            create(settings, seed)
-            raise ValueError('injected constructor failure')
+            def fail(settings, seed):
+                create(settings, seed)
+                raise ValueError('injected constructor failure')
 
-        monkeypatch.setattr(storage, 'new_model', fail)
-    elif failure in ('read', 'interrupt'):
-        def fail(*args, **kwargs):
-            error = KeyboardInterrupt if failure == 'interrupt' else ValueError
-            raise error('injected tensor read failure')
+            monkeypatch.setattr(storage, 'new_model', fail)
+        case 'read' | 'interrupt':
+            def fail(*args, **kwargs):
+                error = KeyboardInterrupt if failure == 'interrupt' else ValueError
+                raise error('injected tensor read failure')
 
-        monkeypatch.setattr(mx, 'load', fail)
-    elif failure == 'validation':
-        arrays = dict(checkpoint.arrays)
-        arrays.pop('m.decoder.stop.bias')
-        mx.save_safetensors(checkpoint.path, arrays, metadata=checkpoint.metadata)
+            monkeypatch.setattr(mx, 'load', fail)
+        case 'validation':
+            arrays = dict(checkpoint.arrays)
+            arrays.pop('m.decoder.stop.bias')
+            mx.save_safetensors(checkpoint.path, arrays, metadata=checkpoint.metadata)
 
     random.seed(817)
     random.random()

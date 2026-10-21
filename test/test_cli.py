@@ -291,16 +291,17 @@ def test_help_forms_need_no_setup(tmp_path, model_free_cli, manual, argv):
     assert result.stderr == ''
     assert 'Traceback' not in result.stderr
     assert list(tmp_path.iterdir()) == []
-    if argv in (['--help'], ['-h']):
-        assert result.stdout.startswith('usage: tmt')
-        assert 'tmt help' in result.stdout
-        assert '## init' not in result.stdout
-    elif argv == ['help']:
-        assert result.stdout == manual
-    else:
-        topic = 'help' if argv[:2] == ['help', '--help'] else 'train'
-        section = manual.split(f'## {topic}\n', 1)[1].split('\n## ', 1)[0]
-        assert result.stdout == f'## {topic}\n{section.rstrip()}\n'
+    match argv:
+        case ['--help'] | ['-h']:
+            assert result.stdout.startswith('usage: tmt')
+            assert 'tmt help' in result.stdout
+            assert '## init' not in result.stdout
+        case ['help']:
+            assert result.stdout == manual
+        case _:
+            topic = 'help' if argv[:2] == ['help', '--help'] else 'train'
+            section = manual.split(f'## {topic}\n', 1)[1].split('\n## ', 1)[0]
+            assert result.stdout == f'## {topic}\n{section.rstrip()}\n'
 
 
 @pytest.mark.parametrize(
@@ -701,10 +702,10 @@ def test_evaluate_command(workspace, checkpoint, run_cli):
     ids=['console-script', 'python-m'],
 )
 @pytest.mark.parametrize('signal_name', ['SIGINT', 'SIGTERM'])
-def test_train_signal_saves_checkpoint(workspace, snapshot, launch, signal_name):
+def test_train_signal_saves_checkpoint(
+    workspace, snapshot, run_subprocess, launch, signal_name
+):
     import signal
-    import subprocess
-    import sys
 
     from tmt.checkpoint import load_checkpoint
     from tmt.runtime import train
@@ -722,10 +723,7 @@ Model.update_gradients = interrupt
 ARGV = ['train', '--data', 'train.bin', '--run', 'interrupted',
         '--seed', '11', '--updates', '3']
 """.replace('SIGNAL_NAME', signal_name) + launch
-    result = subprocess.run(
-        [sys.executable, '-c', script], cwd=workspace,
-        capture_output=True, text=True, timeout=30,
-    )
+    result = run_subprocess(script=script, cwd=workspace, timeout=30)
     assert result.returncode == -signal.SIGINT, result.stderr
     assert 'Traceback' not in result.stderr
     assert result.stderr.splitlines()[-1] == 'tmt: interrupted'
@@ -786,7 +784,9 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
     root = tmp_path
     assert '## init' in cli('help', 'init').stdout
     cli('init')
-    (root / 'model.json').write_text('{"dim":4,"layers":1,"spread":4,"block":"rtu"}')
+    (root / 'model.json').write_text(
+        '{"dim":4,"layers":1,"spread":4,"block":"tmt-v0"}'
+    )
     (root / 'data/train/tiny.bin').write_bytes(b'abcd')
     (root / 'data/dev/tiny.bin').write_bytes(b'wxyz')
     progress = cli(

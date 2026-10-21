@@ -9,7 +9,7 @@
       40000,
       120000
     ],
-    "block": "rtu"
+    "block": "tmt-v0"
   },
   "trainable_parameters": null,
   "temporal_gradient": null,

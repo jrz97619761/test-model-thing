@@ -13,5 +13,4 @@ __pycache__/
 /build/
 /dist/
 *.whl
-# Direct pip installations can recreate source metadata.
 *.egg-info
