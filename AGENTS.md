@@ -133,7 +133,9 @@ Resume appends to `loss.jsonl`, `samples.jsonl`, and `evaluation.jsonl`, and ren
 Run and sweep manifests require the groups `model`, `hparams`, `data`, `training`, `monitoring`, `progress`, and `run`.
 Sweep manifests also contain `grid`. Run data includes train and optional evaluation selections.
 Sweep data includes train, development, and optional evaluation selections.
-`inspect_checkpoint()` requires object values for grouped `run`, `training`, and `progress`. It rejects incomplete or flat run manifests with `ValueError`.
+
+`inspect_checkpoint()` requires object values for grouped `run`, `training`, and `progress`.
+Missing groups or non-object groups cause `ValueError`. Missing summary fields return `None`.
 
 Sweep result rows group model settings, hyperparameters, data selections, training settings, evaluation scores, and run identity.
 Loss, sample, and interval-evaluation JSONL rows keep their flat field names.

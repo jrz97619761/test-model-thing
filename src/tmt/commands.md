@@ -391,7 +391,7 @@ Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-
 
 | Field path | Meaning |
 | --- | --- |
-| `model` | Candidate `block`, `dimensions`, `trainable_parameters`, and `temporal_gradient`. |
+| `model` | Candidate `block`, `dimensions`, `trainable_parameters`, `temporal_gradient`, and optional `extensions`. |
 | `hparams` | Candidate `optimizer` and `sampling` settings. |
 | `data.train.glob` | Train glob as supplied. |
 | `data.development` | Development `glob` and `max_bytes`. |
