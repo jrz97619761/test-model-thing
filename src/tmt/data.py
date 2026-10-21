@@ -4,8 +4,18 @@ from __future__ import annotations
 
 import glob
 from collections.abc import Iterator
+from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class DataOptions:
+    """Training and optional evaluation file selections for one run."""
+
+    pattern: str | PathLike[str]
+    eval_data: str | PathLike[str] | None = None
+    eval_max_bytes: int = 8192
 
 
 class ByteFiles:

@@ -78,26 +78,7 @@ def jsonl():
 @pytest.fixture
 def manifest_fields():
     return {
-        'config',
-        'seed',
-        'data_glob',
-        'data_files',
-        'updates',
-        'log_every',
-        'objective',
-        'completed_updates',
-        'resume',
-        'initial_optimizer_step',
-        'started_at',
-        'status',
-        'last_checkpoint',
-        'error',
-        'optimizer_step',
-        'save_every',
-        'sample',
-        'evaluation',
-        'trainable_parameters',
-        'temporal_gradient',
+        'model', 'hparams', 'data', 'training', 'monitoring', 'progress', 'run',
     }
 
 
@@ -123,7 +104,9 @@ def run_cli(tmp_path, monkeypatch, capsys):
 @pytest.fixture
 def workspace(tmp_path, monkeypatch, tiny_settings):
     """Run in tmp_path with model.json, grid.json, train.bin, and dev.bin."""
-    (tmp_path / 'model.json').write_text(json.dumps(tiny_settings))
+    from tmt.config import group_model_config
+
+    (tmp_path / 'model.json').write_text(json.dumps(group_model_config(tiny_settings)))
     (tmp_path / 'grid.json').write_text('{"seed": [11, 22]}')
     (tmp_path / 'train.bin').write_bytes(b'abc')
     (tmp_path / 'dev.bin').write_bytes(b'xyz')

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 from . import validation
-from .config import load_config
+from .config import group_model_config, load_config
 from .records import build_run_manifest, write_json
 from .runtime import evaluate_checkpoint, generate, inspect_checkpoint, sweep, train
 
@@ -435,10 +435,10 @@ def _run_init(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         objective='tmt',
     )
     templates = (
-        {args.output: settings}
+        {args.output: group_model_config(settings)}
         if args.output is not None
         else {
-            'model.json': settings,
+            'model.json': group_model_config(settings),
             'grid.json': {
                 'dim': [4, 8],
                 'layers': [1],

@@ -1,33 +1,54 @@
 {
-  "config": {
-    "dim": 512,
-    "layers": 16,
-    "spread": 32,
-    "temp": 0.75,
-    "rate": 0.0005,
-    "bound": [
-      40000,
-      120000
-    ],
-    "block": "tmt-v0"
+  "model": {
+    "block": "tmt-v0",
+    "dimensions": {
+      "dim": 512,
+      "layers": 16,
+      "spread": 32
+    },
+    "trainable_parameters": null,
+    "temporal_gradient": null
   },
-  "trainable_parameters": null,
-  "temporal_gradient": null,
-  "seed": 11,
-  "data_glob": "data/train/*",
-  "data_files": [],
-  "updates": 1000,
-  "log_every": 100,
-  "save_every": 500,
-  "objective": "tmt",
-  "completed_updates": 0,
-  "resume": false,
-  "initial_optimizer_step": 0,
-  "optimizer_step": 0,
-  "sample": null,
-  "evaluation": null,
-  "started_at": null,
-  "status": "running",
-  "last_checkpoint": null,
-  "error": null
+  "hparams": {
+    "optimizer": {
+      "rate": 0.0005,
+      "bound": [
+        40000,
+        120000
+      ]
+    },
+    "sampling": {
+      "temp": 0.75
+    }
+  },
+  "data": {
+    "train": {
+      "glob": "data/train/*",
+      "files": []
+    },
+    "evaluation": null
+  },
+  "training": {
+    "seed": 11,
+    "updates": 1000,
+    "objective": "tmt",
+    "resume": false
+  },
+  "monitoring": {
+    "log_every": 100,
+    "save_every": 500,
+    "sample": null,
+    "evaluation": null
+  },
+  "progress": {
+    "completed_updates": 0,
+    "initial_optimizer_step": 0,
+    "optimizer_step": 0
+  },
+  "run": {
+    "started_at": null,
+    "status": "running",
+    "last_checkpoint": null,
+    "error": null
+  }
 }

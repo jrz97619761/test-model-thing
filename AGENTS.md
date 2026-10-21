@@ -12,18 +12,18 @@ All package paths below are relative to `src/tmt/`.
 | --- | --- |
 | `model.py` | `Encoder`, `Decoder`, `Model`, objective loss, optimizer updates, and byte samples |
 | `blocks.py` | `Block`, the `TMTv0Block`, block registry, recurrent state, and gradient traces |
-| `config.py` | `MODEL_DEFAULTS` and partial JSON configuration through `load_config()` |
+| `config.py` | `MODEL_DEFAULTS` and grouped partial JSON configuration through `load_config()` |
 | `validation.py` | Input checks, checkpoint metadata and tensor checks, and block contracts |
 | `checkpoint.py` | Seeded model creation and Safetensors save/load |
-| `data.py` | `ByteFiles`, file selection, readability checks, and raw-byte document reads |
-| `runtime.py` | `TrainingRun`, train loops, samples, checkpoint evaluation and inspection, generation, and sweeps |
+| `data.py` | `DataOptions`, `ByteFiles`, file selection, readability checks, and raw-byte document reads |
+| `runtime.py` | `TrainingRun`, `TrainingOptions`, `MonitorOptions`, train loops, samples, checkpoint evaluation and inspection, generation, and sweeps |
 | `records.py` | Typed manifest records, JSON output, and JSONL output |
 | `benchmark.py` | Frozen byte evaluation, fixed byte fixtures, and optional CoLA classification |
 | `cli.py`, `__main__.py` | Argument parsing, command dispatch, and `python -m tmt` |
 | `commands.md` | Packaged command manual, also returned by `tmt help` |
 
 `pyproject.toml` defines the package, dependencies, Python versions, console script, and package data.
-`examples/` contains model configurations, a sweep grid, and a run manifest example.
+`examples/` contains grouped model configurations, a flat sweep grid, and a grouped run manifest example.
 The model import is `from tmt.model import Model`. There is no `tmt.main` compatibility module.
 
 ## Work on this repository
@@ -79,11 +79,13 @@ The tests are in `test/`:
 | `test_benchmark.py` | Byte scores, CoLA input and output, and benchmark entry points |
 | `test_config.py` | Configuration, templates, checkpoint validation, atomic saves, and RNG preservation |
 | `test_cli.py` | Help, errors, byte files, generation, evaluation, interrupts, and installed commands |
+| `test_records.py` | Grouped run and sweep manifest records |
 | `test_train.py` | Train updates, resume, manifests, samples, evaluation intervals, and sweeps |
 
 `test/conftest.py` supplies shared fixtures.
 Use `run_subprocess` for child Python scripts, module commands, and installed-command checks.
 Tests import helpers from the module that defines them. `tmt.cli` exports CLI entry points only.
+
 `test/fixtures/tmt-v0-baseline.json` records seeded numerical results.
 Do not regenerate the baseline only to hide a regression. Review any intentional baseline change.
 
@@ -91,6 +93,8 @@ Do not regenerate the baseline only to hide a regression. Review any intentional
 
 - Preserve raw-byte documents and output. The encoder has 256 byte embeddings, and the decoder returns 256 byte logits.
 - Keep defaults in `MODEL_DEFAULTS`. Direct `Model` construction requires all constructor arguments.
+- Model config JSON uses `model` and `hparams` groups. `load_config()` accepts grouped partial input only. An empty object uses all defaults. It returns flat settings for `Model` and checkpoint metadata.
+- Keep `DataOptions` in `data.py`. `TrainingOptions` and `MonitorOptions` group internal train inputs. Keep the public `train()` and `sweep()` arguments stable.
 - Preserve config validation, examples, and checkpoint metadata when model fields change.
 - Keep imports free of prompts, model runs, and file writes.
 - Preserve help and version commands without MLX imports. Inspect the imports in CLI dependencies as well as `cli.py`.
@@ -113,10 +117,11 @@ Identify any fixture change that prevents direct score comparisons.
 ## Checkpoints and train runs
 
 `checkpoint.py` saves model parameters, block runtime arrays, and optimizer tensors.
-The Safetensors metadata contains a `tmt` JSON string with `version: 1` and the resolved model configuration.
+The Safetensors metadata contains a `tmt` JSON string with `version: 1` and the flat resolved model configuration.
 The loader requires the current metadata fields and exact tensor names, shapes, and dtypes.
+Grouped config input resolves to flat settings before model construction and checkpoint save.
 
-- Preserve strict checkpoint validation. Provide explicit migration behavior when a requested change alters the format.
+- Preserve strict checkpoint validation and flat checkpoint metadata. Do not add fallback support for flat model configs or run manifests.
 - Preserve the caller's Python and MLX RNG state across checkpoint loads after success or failure.
 - Preserve the temporary-file save and atomic replacement in the destination directory.
 - Preserve the previous checkpoint when a save fails.
@@ -124,6 +129,15 @@ The loader requires the current metadata fields and exact tensor names, shapes, 
 Resume restores checkpoint settings and tensors, then starts a new data pass.
 It does not restore the previous file cursor or RNG state.
 Resume appends to `loss.jsonl`, `samples.jsonl`, and `evaluation.jsonl`, and renames the earlier `run.json` to `run.replaced-<UTC timestamp>.json`. A fresh run starts empty files.
+
+Run and sweep manifests require the groups `model`, `hparams`, `data`, `training`, `monitoring`, `progress`, and `run`.
+Sweep manifests also contain `grid`. Run data includes train and optional evaluation selections.
+Sweep data includes train, development, and optional evaluation selections.
+`inspect_checkpoint()` requires object values for grouped `run`, `training`, and `progress`. It rejects incomplete or flat run manifests with `ValueError`.
+
+Sweep result rows group model settings, hyperparameters, data selections, training settings, evaluation scores, and run identity.
+Loss, sample, and interval-evaluation JSONL rows keep their flat field names.
+
 The CLI refuses a fresh run at an existing explicit checkpoint path.
 The trainer resets recurrent state and traces for each nonempty document.
 File order uses a separate seeded Python RNG.
@@ -133,7 +147,9 @@ The trainer also saves at normal completion. It rewrites `run.json` after each s
 On the main thread, its SIGINT and SIGTERM handler records an interrupt request.
 The trainer checks the request at complete update boundaries, after the update actions.
 It saves before it raises `KeyboardInterrupt` for that request.
+
 Worker threads do not install that handler.
+
 `cli.console_main()` is the entry point for the console script and `python -m tmt`.
 It prints `tmt: interrupted` and lets the `KeyboardInterrupt` end the process through SIGINT.
 `cli.main()` raises `KeyboardInterrupt` to its caller.
@@ -151,5 +167,6 @@ It prints `tmt: interrupted` and lets the `KeyboardInterrupt` end the process th
 - A new command needs one `COMMANDS` entry in `cli.py` and one `## name` section in `src/tmt/commands.md`. `test_every_command_has_handler_and_manual_section` checks both.
 - Keep the manual in package data. Verify affected examples against the implementation.
 - Preserve intentional JSON field order in examples and manifest builders.
+- Group run and sweep manifests by `model`, `hparams`, `data`, `training`, `monitoring`, `progress`, and `run` fields. Keep `loss.jsonl`, `samples.jsonl`, and `evaluation.jsonl` row fields flat. Sweep result rows use grouped records.
 - Use concise technical English. Apply the installed `simplified-technical-english` skill when available.
 - Report what changed, which checks ran, and any material limits.

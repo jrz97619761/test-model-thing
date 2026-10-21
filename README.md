@@ -57,7 +57,7 @@ mkdir my-workspace
 cd my-workspace
 tmt init
 # Select a tiny model for this example.
-printf '{"dim":4,"layers":1,"spread":4}\n' > model.json
+printf '{"model":{"dimensions":{"dim":4,"layers":1,"spread":4}}}\n' > model.json
 printf abcd > data/train/tiny.bin
 tmt train --data 'data/train/*' --run first --updates 3 --seed 11
 tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 2 --seed 11

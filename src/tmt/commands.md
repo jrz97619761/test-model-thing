@@ -15,9 +15,39 @@ A sweep requires its base seed even when the grid has a `seed` field. Each grid 
 
 Relative paths use the current directory. The CLI does not search parent folders for files or runs. Data globs select raw files. The CLI sorts paths that match. Each file is one document, and the model resets at each document boundary. The CLI reads file contents as bytes, adds no separators, and does not decode them as text.
 
-The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, `bound`, and `block`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, `[40000, 120000]`, and `"tmt-v0"`. The package registers only the `tmt-v0` block. The optimizer uses `rate` as the weight update rate. `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss.
+Model config JSON groups model shape under `model` and optimizer and sampler values under `hparams`.
+`model.dimensions` contains `dim`, `layers`, and `spread`. `model.block` selects the block factory.
+`hparams.optimizer` contains `rate` and `bound`. `hparams.sampling` contains `temp`.
+Optional extra defaults use `model.extensions`.
 
-`tmt.config.MODEL_DEFAULTS` supplies these defaults. `load_config()` resolves partial JSON configurations.
+The dimension defaults are `dim=512`, `layers=16`, and `spread=32`.
+The optimizer defaults are `rate=0.0005` and `bound=[40000, 120000]`.
+The sample temperature defaults to `0.75`. The block default is `"tmt-v0"`.
+
+The package registers only the `tmt-v0` block. The optimizer uses `rate` as the weight update rate.
+`temp` is a unitless sampler value, and `bound` uses optimizer updates.
+The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss.
+
+`tmt.config.MODEL_DEFAULTS` supplies these defaults. `load_config()` accepts grouped partial JSON only.
+An empty JSON object uses all defaults. The loader rejects flat top-level model fields.
+
+There is no automatic converter. Use the grouped form in the example below for model configs.
+The loader returns flat settings for `Model` and checkpoint metadata.
+For example, grouped model config uses this form:
+
+```json
+{
+  "model": {
+    "block": "tmt-v0",
+    "dimensions": {"dim": 4, "layers": 1, "spread": 4}
+  },
+  "hparams": {
+    "optimizer": {"rate": 0.0005, "bound": [40000, 120000]},
+    "sampling": {"temp": 0.75}
+  }
+}
+```
+
 Direct Python calls to `Model` require all seven settings. For example:
 
 ```python
@@ -160,9 +190,19 @@ tmt init --output configs/model.json
 ```
 
 ### Behavior and files
-Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the configuration defaults, with `"block": "tmt-v0"`. Edit it before a real experiment. The run template sets `sample` and `evaluation` to `null`.
+Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed.
+`model.json` stores dimensions under `model.dimensions` and the block under `model.block`.
+It stores optimizer and sampler values under `hparams`. Edit it before a real experiment.
+The run template sets `data.evaluation`, `monitoring.sample`, and `monitoring.evaluation` to `null`.
 
-`grid.json` has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, `block=["tmt-v0"]`, and `seed=[11,22]`. `run.example.json` shows the manifest fields with an empty file list. It has null values for `started_at`, `trainable_parameters`, and `temporal_gradient`. It is a template, not a run record. The command opens each JSON destination in exclusive-create mode. If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
+`grid.json` keeps flat axes named `dim`, `layers`, `spread`, `block`, and `seed`.
+It has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, `block=["tmt-v0"]`, and `seed=[11,22]`.
+Grid axes use flat model field names, even when `model.json` uses grouped config.
+
+`run.example.json` shows the grouped manifest fields with an empty train file list.
+It sets `model.trainable_parameters`, `model.temporal_gradient`, `data.evaluation`, `monitoring.sample`, `monitoring.evaluation`, `run.started_at`, `run.last_checkpoint`, and `run.error` to `null`.
+It is a template, not a run record. The command opens each JSON destination in exclusive-create mode.
+If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
 
 The `--output` form creates parent folders as needed. It writes only the model config and does not create workspace folders.
 
@@ -211,32 +251,39 @@ tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 
 ### Behavior and files
 The CLI sorts matched paths and shuffles them once from `--seed`. It repeats that order until it reaches `--updates`. Each adjacent byte pair gives one target-byte update. The model resets block state and temporal traces at each file boundary. A file with fewer than two bytes gives no update. It consumes the terminal byte without an update.
 
-A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder. The command checks train and evaluation selections before folder creation. The evaluation selection must contain at least one document with two or more bytes. Unmatched globs and unreadable files cause an input error. After an input error, correct the input and retry with the same run name. A failure after the run starts leaves the run folder with its manifest, so a retry needs a new run name. A train selection without a file of two or more bytes is such a failure. The run fails in its first data pass with status `failed`.
+A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder. The command checks train and evaluation selections before folder creation. The evaluation selection must contain at least one document with two or more bytes.
+
+Unmatched globs and unreadable files cause an input error. After an input error, correct the input and retry with the same run name. A failure after the run starts leaves the run folder with its manifest, so a retry needs a new run name. A train selection without a file of two or more bytes is such a failure. The run fails in its first data pass with status `failed`.
 
 A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp run stores it at `runs/<TIMESTAMP>/manifest/run.json`. An explicit checkpoint stores it at `manifest/run.json` under its parent folder.
 
-| Field | Meaning |
+| Field path | Meaning |
 | --- | --- |
-| `config` | Complete model settings for this invocation, with `block`. Resume uses checkpoint settings. |
-| `trainable_parameters` | Count of trainable tensor elements before a full-model freeze. This count excludes runtime state and traces. |
-| `temporal_gradient` | Ordered list of temporal-gradient labels, one for each block in the layer stack. |
-| `seed` | Model initialization and file-order seed for this invocation. |
-| `data_glob` | The train glob as supplied. Relative globs use the invocation directory. |
-| `data_files` | All matched absolute paths, in the shuffled order for each data pass. |
-| `updates` | Requested target-byte optimizer updates for this invocation. Resume adds this budget to the saved optimizer step. |
-| `log_every` | Update interval for progress output and loss rows. |
-| `save_every` | Checkpoint save interval in updates. |
-| `objective` | `tmt` for the full TMT loss, or `ce_only` for next-byte cross entropy. |
-| `completed_updates` | Zero at start. Completed updates in this invocation at the last checkpoint save, or at exit after success, failure, or interrupt. |
-| `resume` | `true` for resume, or `false` for a fresh run. |
-| `initial_optimizer_step` | The saved optimizer step at resume start, or zero for a fresh run. |
-| `optimizer_step` | Total optimizer step at the last manifest write. After a resume, it includes the updates before the resume. |
-| `sample` | Sample settings, or `null` when sampling is disabled. |
-| `evaluation` | Evaluation glob, selected files, interval, and byte budget, or `null` when interval evaluation is disabled. |
-| `started_at` | Invocation start time in UTC. |
-| `status` | `running`, `complete`, `interrupted`, or `failed`. |
-| `last_checkpoint` | Absolute path of the last successful checkpoint, or null before a fresh run saves. |
-| `error` | `type` and `message` of the exception that failed the run, or null. An interrupt does not set it. |
+| `model.block` | Block factory for each layer. |
+| `model.dimensions` | `dim`, `layers`, and `spread` for this model. |
+| `model.extensions` | Optional extra settings from `MODEL_DEFAULTS`. |
+| `model.trainable_parameters` | Trainable tensor element count before a full-model freeze. It excludes runtime state and traces. |
+| `model.temporal_gradient` | Ordered list of temporal-gradient labels, one for each block in the layer stack. |
+| `hparams.optimizer` | `rate` and `bound` used by the optimizer. |
+| `hparams.sampling.temp` | Sampling temperature. |
+| `data.train.glob` | Train glob as supplied. Relative globs use the invocation directory. |
+| `data.train.files` | Matched absolute train paths, in the shuffled order for each data pass. |
+| `data.evaluation` | Evaluation `glob`, selected `files`, and `max_bytes`, or `null` when evaluation is disabled. |
+| `training.seed` | Model initialization and file-order seed for this invocation. |
+| `training.updates` | Requested target-byte optimizer updates. Resume adds this budget to the saved optimizer step. |
+| `training.objective` | `tmt` for the full TMT loss, or `ce_only` for next-byte cross entropy. |
+| `training.resume` | `true` for resume, or `false` for a fresh run. |
+| `monitoring.log_every` | Update interval for progress output and loss rows. |
+| `monitoring.save_every` | Checkpoint save interval in updates. |
+| `monitoring.sample` | Sample `every`, `prompt`, `seed`, and `bytes`, or `null` when sampling is disabled. |
+| `monitoring.evaluation` | Evaluation interval `every`, or `null` when interval evaluation is disabled. |
+| `progress.completed_updates` | Completed updates in this invocation at the last checkpoint save, or at exit after success, failure, or interrupt. |
+| `progress.initial_optimizer_step` | Saved optimizer step at resume start, or zero for a fresh run. |
+| `progress.optimizer_step` | Total optimizer step at the last manifest write. After resume, it includes earlier updates. |
+| `run.started_at` | Invocation start time in UTC. |
+| `run.status` | `running`, `complete`, `interrupted`, or `failed`. |
+| `run.last_checkpoint` | Absolute path of the last successful checkpoint, or `null` before a fresh run saves. |
+| `run.error` | Error `type` and `message`, or `null`. An interrupt does not set it. |
 
 The file list records selection and pass order. The update budget can stop a pass before the trainer reads every file. Paths do not prove that file contents stay the same. The completed update count includes work after the last checkpoint. It does not imply that the trainer saved all completed updates.
 
@@ -257,13 +304,22 @@ A fresh run starts an empty `loss.jsonl`. A resume appends its rows to the rows 
 
 The checkpoint contains model and optimizer tensors. The loader checks metadata, tensor names, shapes, and types before restore.
 
-At fresh-run start, `last_checkpoint` is null. Resume starts with the input checkpoint path. Before it writes its own `run.json`, it renames the earlier `run.json` to `run.replaced-<UTC timestamp>.json` in the same folder. The timestamp is the start time of the resume, and it also names the `samples/` folder of the resume. Each successful save sets `last_checkpoint` to the absolute path. Resume adds the requested optimizer updates and starts a new data pass. It does not restore a data cursor or random-number state.
+At fresh-run start, `run.last_checkpoint` is null. Resume starts with the input checkpoint path.
+Before it writes its own `run.json`, it renames the earlier file to `run.replaced-<UTC timestamp>.json` in the same folder.
+The timestamp marks resume start. It also names the `samples/` folder for that invocation.
+
+Each successful save sets `run.last_checkpoint` to the absolute path.
+Resume adds the requested optimizer updates and starts a new data pass.
+It does not restore a data cursor or random-number state.
 
 The command prints the run folder, seed, config, and successful checkpoint saves.
 Each save line and the final line show `updates`, the completed updates in this invocation, and `step`, the total optimizer step. After a resume, `step` includes the updates before the resume.
 At each progress interval, it prints completed updates, total optimizer step, objective, mean loss, latest loss, and update speed.
 It always prints the final loss.
-It saves after each `--save-every` interval and at the end. Ctrl-C requests a stop after the active update and its post-update actions. The trainer saves a checkpoint and records status `interrupted`. The CLI then prints `tmt: interrupted` without a traceback and exits through SIGINT. A shell reports exit status `130`. SIGTERM, for example from `kill` or a job scheduler, has the same effect, and the command also exits through SIGINT with status `130`. An update failure preserves the last successful checkpoint.
+
+It saves after each `--save-every` interval and at the end. Ctrl-C requests a stop after the active update and its post-update actions. The trainer saves a checkpoint and records status `interrupted`. The CLI then prints `tmt: interrupted` without a traceback and exits through SIGINT. A shell reports exit status `130`. SIGTERM, for example from `kill` or a job scheduler, has the same effect, and the command also exits through SIGINT with status `130`.
+
+An update failure preserves the last successful checkpoint.
 
 Checkpoint saves use a temporary file in the checkpoint directory. A successful save atomically replaces the destination and preserves its file permissions. A failed write preserves the previous checkpoint.
 
@@ -297,7 +353,7 @@ tmt sweep --grid PATH --data GLOB --development GLOB --output DIR --seed N [--co
 
 ### Requirements and options
 
-- `--grid PATH` is required. The JSON root must be an object. Each model field or `seed` must map to a nonempty array of values. The CLI checks the grid before it creates the output folder.
+- `--grid PATH` is required. The JSON root must be an object. Each flat model field or `seed` must map to a nonempty array of values. The CLI checks the grid before it creates the output folder.
 - `--data GLOB` is required and selects raw-byte train files. Quote the glob.
 - `--development GLOB` is required and selects raw-byte score files. Quote the glob.
 - `--output DIR` is required. The folder must be new or empty. The command rejects a nonempty folder without changes.
@@ -331,7 +387,36 @@ tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --ou
 ### Behavior and files
 The CLI visits value combinations in the key and value order from the JSON file. It trains one candidate at a time. A grid `seed` value selects that candidate's seed. Other grid values replace fields in the base model config. Each candidate uses a `run-NNNN/` folder under `DIR`. The folder contains `model.safetensors` and a `manifest/` folder.
 
-Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same manifest fields as a standalone train invocation. Its loss rows are in `run-NNNN/manifest/loss.jsonl`. Sample and interval-evaluation files also stay in each candidate folder. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `trainable_parameters`, `temporal_gradient`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
+Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same groups as a standalone train invocation. Its loss rows are in `run-NNNN/manifest/loss.jsonl`. Sample and interval-evaluation files also stay in each candidate folder. The command appends one grouped JSON result per candidate to `results.jsonl`.
+
+| Field path | Meaning |
+| --- | --- |
+| `model` | Candidate `block`, `dimensions`, `trainable_parameters`, and `temporal_gradient`. |
+| `hparams` | Candidate `optimizer` and `sampling` settings. |
+| `data.train.glob` | Train glob as supplied. |
+| `data.development` | Development `glob` and `max_bytes`. |
+| `training.seed` | Seed for this candidate. |
+| `training.updates` | Requested target-byte update count. |
+| `training.objective` | `tmt` or `ce_only`. |
+| `evaluation.targets` | Development target count. |
+| `evaluation.bpb` | Development bits per byte. |
+| `run.index` | Candidate number. |
+| `run.checkpoint` | Absolute path to the candidate checkpoint. |
+
+The top-level `sweep.json` uses the same groups and adds `grid`.
+
+| Field path | Meaning |
+| --- | --- |
+| `model` | Base `block`, `dimensions`, and optional `extensions`. `trainable_parameters` and `temporal_gradient` start as `null`. |
+| `hparams` | Base `optimizer` and `sampling` settings. |
+| `grid` | Flat axes that define candidate values. |
+| `data.train` | Train `glob` and matched absolute `files`. |
+| `data.development` | Development `glob`, matched absolute `files`, and `max_bytes`. |
+| `data.evaluation` | Optional interval-evaluation `glob`, matched absolute `files`, and `max_bytes`. |
+| `training` | Base `seed`, `updates`, `objective`, and `resume` values. |
+| `monitoring` | Log and save intervals, sample options, and evaluation interval. |
+| `progress` | `completed_runs` and `current_run` values. |
+| `run` | `started_at`, `status`, and `error` values. |
 
 The package registers only `tmt-v0`. To compare it with a custom block, add a factory to `src/tmt/blocks.py` first.
 Then add the block names and paired seeds to the grid. Keep the base config, data, objective, optimizer settings, and update budget fixed.
@@ -362,7 +447,13 @@ Use a new or empty output folder for each sweep. The command rejects a nonempty 
 
 The command checks train, evaluation, and development selections before output creation. The evaluation and development selections must each contain at least one document with two or more bytes. An input error leaves no new output folder. Correct the input and retry with the same output path.
 
-After execution starts, `sweep.json` records the settings, grid, data selections, status, current candidate, and completed result count. It also records the error type and message after a failure or interrupt. Completed rows remain in `results.jsonl`. Ctrl-C or SIGTERM stops the active run as in `train`, then prints `tmt: interrupted` and exits through SIGINT. To retry after an execution failure, use a new output path. The command does not resume a partial sweep.
+After execution starts, `sweep.json` records settings in the groups above.
+It updates `progress.current_run` before each candidate and `progress.completed_runs` after each result.
+It records the final state in `run.status` and `run.error`.
+Completed rows remain in `results.jsonl`. Ctrl-C or SIGTERM stops the active run as in `train`.
+The command then prints `tmt: interrupted` and exits through SIGINT.
+
+To retry after an execution failure, use a new output path. The command does not resume a partial sweep.
 
 ## evaluate
 
@@ -444,7 +535,10 @@ TMT-v0 uses recurrent-state features. Other blocks use final-output features by 
 The benchmark reports the JSON key `feature_source` as `recurrent-state` or `final-output` with the CoLA scores.
 The `epoch_scores` key contains the CoLA scores for each epoch. Without CoLA, this list is empty.
 
-The benchmark prints results to the terminal. With `--output`, it also writes `byte_scores`, `feature_source` when CoLA runs, and `epoch_scores`, then `checkpoint`, the checkpoint path as given, `optimizer_step`, its total optimizer step, and `seed`. Objective loss is not part of the result. It does not save a checkpoint. A missing supplied TSV raises an ordinary file error.
+The benchmark prints results to the terminal. With `--output`, it also writes `byte_scores`, optional `feature_source` for CoLA, and `epoch_scores`.
+The result then adds `checkpoint`, the path as given, `optimizer_step`, its total update count, and `seed`.
+Objective loss is not part of the result. The command does not save a checkpoint.
+A missing supplied TSV raises a file error.
 
 ## generate
 
@@ -509,7 +603,16 @@ tmt inspect runs/first/model.safetensors
 ### Behavior and files
 The command loads the checkpoint and prints three lines. The first line shows the checkpoint path, `step`, the total optimizer step, and the count of trainable tensor elements. The second line shows the model config as JSON. The third line shows `status`, `objective`, `seed`, and `completed_updates` (as `updates`) from `manifest/run.json` beside the checkpoint. Without that file, the third line is `run manifest: none`.
 
-The manifest is the record of the latest invocation that used that folder. During an active run, it shows the state at the last checkpoint save. Before the first save, it shows the state at run start. The command does not change the checkpoint or the manifest, and it does not change the caller's RNG state.
+The manifest is the record of the latest invocation that used that folder. During an active run, it shows the state at the last checkpoint save. Before the first save, it shows the state at run start.
+Inspection requires the grouped `run`, `training`, and `progress` objects.
+If any group is missing or is not an object, Python inspection raises `ValueError` with this message:
+
+```text
+run manifest must contain grouped run, training, and progress objects
+```
+
+This check rejects flat run manifests. No automatic migration is provided.
+The command does not change the checkpoint or the manifest, and it does not change the caller's RNG state.
 
 ## help
 

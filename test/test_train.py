@@ -1,6 +1,7 @@
 import json
 import math
 import signal
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -97,9 +98,12 @@ def test_resume_keeps_earlier_manifest_and_rows(tiny_settings, tmp_path, jsonl):
     archives = sorted(folder.glob('run.replaced-*.json'))
     assert len(archives) == 2
     assert json.loads(archives[0].read_text()) == first
-    assert json.loads(archives[1].read_text())['optimizer_step'] == 5
+    assert json.loads(archives[1].read_text())['progress']['optimizer_step'] == 5
     current = json.loads((folder / 'run.json').read_text())
-    assert (current['initial_optimizer_step'], current['optimizer_step']) == (5, 6)
+    assert (
+        current['progress']['initial_optimizer_step'],
+        current['progress']['optimizer_step'],
+    ) == (5, 6)
     rows = jsonl(folder / 'loss.jsonl')
     assert [r['optimizer_step'] for r in rows] == [2, 3, 5, 6]
     assert [r['completed_updates'] for r in rows] == [2, 3, 2, 1]
@@ -120,8 +124,13 @@ def test_save_every_sets_interval_and_updates_manifest(
     def record(run):
         save(run)
         manifest = json.loads(run.manifest.read_text())
-        fields = ('status', 'completed_updates', 'optimizer_step', 'save_every')
-        saved.append(tuple(manifest[name] for name in fields))
+        fields = (
+            manifest['run']['status'],
+            manifest['progress']['completed_updates'],
+            manifest['progress']['optimizer_step'],
+            manifest['monitoring']['save_every'],
+        )
+        saved.append(fields)
 
     monkeypatch.setattr(TrainingRun, 'save_checkpoint', record)
     train(tiny_settings, checkpoint, str(data), 5, 11, save_every=2)
@@ -143,7 +152,8 @@ def test_resume_file_order_uses_seed(tiny_settings, tmp_path):
     import random
 
     from tmt.checkpoint import new_model, save_checkpoint
-    from tmt.runtime import MonitorOptions, TrainingRun
+    from tmt.data import DataOptions
+    from tmt.runtime import MonitorOptions, TrainingOptions, TrainingRun
 
     data = tmp_path / 'data'
     data.mkdir()
@@ -155,8 +165,10 @@ def test_resume_file_order_uses_seed(tiny_settings, tmp_path):
     for unrelated_seed in (7, 37):
         random.seed(unrelated_seed)
         run = TrainingRun(
-            settings=None, path=checkpoint, pattern=str(data / '*.bin'),
-            updates=1, seed=19, ce_only=False, resume=True, log_every=100,
+            settings=None,
+            path=checkpoint,
+            data=DataOptions(pattern=str(data / '*.bin')),
+            options=TrainingOptions(updates=1, seed=19, resume=True),
             monitor=MonitorOptions(),
         )
         run.setup()
@@ -216,9 +228,9 @@ def test_sigint_saves_complete_update(
     loaded, _ = load_checkpoint(checkpoint)
     assert snapshot(loaded) == snapshot(expected)
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
-    assert record['status'] == 'interrupted'
-    assert record['completed_updates'] == 1
-    assert record['last_checkpoint'] == str(checkpoint.resolve())
+    assert record['run']['status'] == 'interrupted'
+    assert record['progress']['completed_updates'] == 1
+    assert record['run']['last_checkpoint'] == str(checkpoint.resolve())
     *earlier, row = jsonl(checkpoint.parent / 'manifest/loss.jsonl')
     assert [r['optimizer_step'] for r in earlier] == ([2] if resume else [])
     assert row['optimizer_step'] == (3 if resume else 1)
@@ -254,7 +266,7 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
         paths[content[0]] = str((tmp_path / 'data' / name).resolve())
 
     def capture(record, *args, **kwargs):
-        records.append(dict(record))
+        records.append(deepcopy(record))
         return original_dump(record, *args, **kwargs)
 
     def record_train(model, current, target, end, ce_only=False, **kwargs):
@@ -272,30 +284,68 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
     example_path = Path(__file__).resolve().parents[1] / 'examples' / 'run.example.json'
     example = json.loads(example_path.read_text())
     assert list(records[0]) == list(example)
-    assert records[0]['trainable_parameters'] == trained.count()
-    assert records[0]['temporal_gradient'] == trained.temporal_gradient
-    fixed = {
-        'config': tiny_settings,
-        'seed': 11,
-        'data_glob': 'data/*.bin',
-        'updates': 4,
-        'objective': 'tmt',
-        'resume': False,
-        'initial_optimizer_step': 0,
+    assert records[0]['model']['trainable_parameters'] == trained.count()
+    assert records[0]['model']['temporal_gradient'] == trained.temporal_gradient
+    settings = tiny_settings
+    expected_model = {
+        'block': settings['block'],
+        'dimensions': {
+            'dim': settings['dim'],
+            'layers': settings['layers'],
+            'spread': settings['spread'],
+        },
     }
+    expected_hparams = {
+        'optimizer': {'rate': settings['rate'], 'bound': settings['bound']},
+        'sampling': {'temp': settings['temp']},
+    }
+    files = [path for path, _ in calls[:3]]
     for record in records:
-        assert {k: record[k] for k in fixed} == fixed
-        assert set(record['data_files']) == set(paths.values())
-        assert record['data_files'] == [path for path, _ in calls[:3]]
-    files = records[0]['data_files']
+        assert record['model'] == {
+            **expected_model,
+            'trainable_parameters': trained.count(),
+            'temporal_gradient': trained.temporal_gradient,
+        }
+        assert record['hparams'] == expected_hparams
+        assert record['training'] == {
+            'seed': 11,
+            'updates': 4,
+            'objective': 'tmt',
+            'resume': False,
+        }
+        assert record['data'] == {
+            'train': {'glob': 'data/*.bin', 'files': files},
+            'evaluation': None,
+        }
+        assert record['monitoring'] == {
+            'log_every': 100,
+            'save_every': 500,
+            'sample': None,
+            'evaluation': None,
+        }
+        assert set(record['progress']) == {
+            'completed_updates', 'initial_optimizer_step', 'optimizer_step'
+        }
+        assert record['progress']['initial_optimizer_step'] == 0
+        assert set(record['run']) == {
+            'started_at', 'status', 'last_checkpoint', 'error'
+        }
+        assert record['run']['error'] is None
     assert calls == [(path, False) for path in files + files[:1]]
-    progress = ('status', 'completed_updates', 'optimizer_step', 'last_checkpoint')
+    progress = ('completed_updates', 'optimizer_step')
     saved = {
         'completed_updates': 4,
         'optimizer_step': 4,
         'last_checkpoint': str(checkpoint),
     }
-    assert [{k: record[k] for k in progress} for record in records] == [
+    assert [
+        {key: record['progress'][key] for key in progress}
+        | {
+            'status': record['run']['status'],
+            'last_checkpoint': record['run']['last_checkpoint'],
+        }
+        for record in records
+    ] == [
         {
             'status': 'running',
             'completed_updates': 0,
@@ -305,7 +355,7 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
         {'status': 'running', **saved},
         {'status': 'complete', **saved},
     ]
-    started_at = datetime.fromisoformat(records[0]['started_at'])
+    started_at = datetime.fromisoformat(records[0]['run']['started_at'])
     assert started_at.utcoffset() == timezone.utc.utcoffset(None)
     run_json = json.loads((checkpoint.parent / 'manifest' / 'run.json').read_text())
     assert run_json == records[-1]
@@ -351,22 +401,32 @@ def test_manifest_after_failure(
 
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
     expected = {
-        'data_glob': str(data),
-        'data_files': [str(data.resolve())],
-        'updates': 3,
-        'completed_updates': 1,
-        'status': status,
-        'seed': 17,
-        'objective': 'ce_only',
-        'resume': resume,
-        'initial_optimizer_step': 2 if resume else 0,
-        'last_checkpoint': str(checkpoint.resolve()) if resume else None,
-        'error': None
-        if resume
-        else {'type': 'OSError', 'message': 'injected update failure'},
+        'data': {
+            'train': {'glob': str(data), 'files': [str(data.resolve())]},
+            'evaluation': None,
+        },
+        'training': {
+            'updates': 3,
+            'seed': 17,
+            'objective': 'ce_only',
+            'resume': resume,
+        },
+        'progress': {
+            'completed_updates': 1,
+            'initial_optimizer_step': 2 if resume else 0,
+            'optimizer_step': 3 if resume else 1,
+        },
+        'run': {
+            'status': status,
+            'last_checkpoint': str(checkpoint.resolve()) if resume else None,
+            'error': None
+            if resume
+            else {'type': 'OSError', 'message': 'injected update failure'},
+        },
     }
     assert set(record) == manifest_fields
-    assert {k: record[k] for k in expected} == expected
+    for group, fields in expected.items():
+        assert {key: record[group][key] for key in fields} == fields
     *earlier, loss_row = jsonl(checkpoint.parent / 'manifest/loss.jsonl')
     assert [r['optimizer_step'] for r in earlier] == ([2] if resume else [])
     expected_row = {
@@ -396,36 +456,39 @@ def test_short_documents_fail_the_run(tiny_settings, tmp_path):
 
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
     expected = {
-        'status': 'failed',
-        'last_checkpoint': None,
-        'updates': 1,
-        'completed_updates': 0,
-        'initial_optimizer_step': 0,
-        'error': {
-            'type': 'ValueError',
-            'message': 'no training targets found in data pass',
+        'run': {
+            'status': 'failed',
+            'last_checkpoint': None,
+            'error': {
+                'type': 'ValueError',
+                'message': 'no training targets found in data pass',
+            },
+        },
+        'training': {'updates': 1},
+        'progress': {
+            'completed_updates': 0,
+            'initial_optimizer_step': 0,
         },
     }
-    assert {k: record[k] for k in expected} == expected
+    for group, fields in expected.items():
+        assert {key: record[group][key] for key in fields} == fields
     assert not checkpoint.exists()
 
 
 def test_post_update_action_order(monkeypatch, tmp_path):
-    from tmt.runtime import MonitorOptions, TrainingRun
+    from tmt.data import DataOptions
+    from tmt.runtime import MonitorOptions, TrainingOptions, TrainingRun
 
     run = TrainingRun(
         settings={},
         path=tmp_path / 'model.safetensors',
-        pattern='data/*',
-        updates=500,
-        seed=11,
-        ce_only=False,
-        resume=False,
-        log_every=500,
+        data=DataOptions(pattern='data/*', eval_data='held-out/*'),
+        options=TrainingOptions(updates=500, seed=11),
         monitor=MonitorOptions(
             sample_every=500,
-            eval_data='held-out/*',
             eval_every=500,
+            log_every=500,
+            save_every=500,
         ),
     )
     run.completed = 500
@@ -536,7 +599,7 @@ def test_loss_rows(
     last = f'updates: {updates}, objective: {objective}, loss: {losses[-1]:.6f}'
     assert last in stdout
     run_json = json.loads((tmp_path / 'manifest/run.json').read_text())
-    assert run_json['log_every'] == interval
+    assert run_json['monitoring']['log_every'] == interval
     reference = tmp_path / 'reference/model.safetensors'
     assert snapshot(model) == snapshot(
         train(tiny_settings, reference, str(data), updates, seed=11, ce_only=ce_only)
@@ -544,8 +607,12 @@ def test_loss_rows(
 
 
 def test_train_command_run_folders(monkeypatch, run_cli, tiny_settings, tmp_path):
+    from tmt.config import group_model_config
+
     (tmp_path / 'train.bin').write_bytes(b'ab')
-    (tmp_path / 'model.json').write_text(json.dumps(tiny_settings))
+    (tmp_path / 'model.json').write_text(
+        json.dumps(group_model_config(tiny_settings))
+    )
     command_calls = []
     monkeypatch.setattr('tmt.cli.train', lambda *a, **k: command_calls.append((a, k)))
 
@@ -656,11 +723,12 @@ def test_interval_evaluation(tiny_settings, tmp_path, snapshot, jsonl):
         }
         for updates in (2, 4, 5)
     ]
-    assert json.loads((folder / 'run.json').read_text())['evaluation'] == {
-        'every': 2,
-        'data_glob': pattern,
+    run_json = json.loads((folder / 'run.json').read_text())
+    assert run_json['monitoring']['evaluation'] == {'every': 2}
+    assert run_json['data']['evaluation'] == {
+        'glob': pattern,
         'max_bytes': 7,
-        'data_files': [str(first.resolve()), str(second.resolve())],
+        'files': [str(first.resolve()), str(second.resolve())],
     }
     development_documents = list(documents(pattern, 7))
     assert development_documents == [b'abcd', b'uvw']
@@ -681,10 +749,13 @@ def test_interval_evaluation(tiny_settings, tmp_path, snapshot, jsonl):
 def test_sweep_rejects_invalid_grid(
     monkeypatch, forbid_call, tiny_settings, tmp_path, grid, message, existing
 ):
+    from tmt.config import group_model_config
     from tmt.runtime import sweep
 
     monkeypatch.setattr('tmt.runtime.train', forbid_call)
-    (tmp_path / 'model.json').write_text(json.dumps(tiny_settings))
+    (tmp_path / 'model.json').write_text(
+        json.dumps(group_model_config(tiny_settings))
+    )
     (tmp_path / 'grid.json').write_text(json.dumps(grid))
     output = tmp_path / 'sweep'
     if existing:
@@ -708,10 +779,11 @@ def test_sweep_rejects_invalid_grid(
 def test_sweep_failure_records_status(
     monkeypatch, tiny_settings, error_type, status, tmp_path
 ):
+    from tmt.config import group_model_config
     from tmt.runtime import sweep
 
     grid, config, data = tmp_path / 'grid.json', tmp_path / 'model.json', tmp_path / 'd'
-    config.write_text(json.dumps(tiny_settings))
+    config.write_text(json.dumps(group_model_config(tiny_settings)))
     grid.write_text('{"seed": [11, 22]}')
     data.write_bytes(b'ab')
     output = tmp_path / 'sweep'
@@ -732,20 +804,24 @@ def test_sweep_failure_records_status(
         sweep(grid, str(data), str(data), output, config, updates=1, seed=11)
 
     record = json.loads((output / 'sweep.json').read_text())
-    expected = {'status': status, 'current_run': 2, 'completed_runs': 1}
-    assert {k: record[k] for k in expected} == expected
+    expected = {
+        'run': {'status': status},
+        'progress': {'current_run': 2, 'completed_runs': 1},
+    }
+    for group, fields in expected.items():
+        assert {key: record[group][key] for key in fields} == fields
     error = {'type': error_type.__name__, 'message': 'injected failure'}
-    assert record['error'] == error
+    assert record['run']['error'] == error
     rows = (output / 'results.jsonl').read_bytes()
     first_row = json.loads(rows.splitlines()[0])
-    assert first_row['trainable_parameters'] == 7
-    assert first_row['temporal_gradient'] == ['tmt-v0']
+    assert first_row['model']['trainable_parameters'] == 7
+    assert first_row['model']['temporal_gradient'] == ['tmt-v0']
     with pytest.raises(FileExistsError, match='choose a new output folder'):
         sweep(grid, str(data), str(data), output, config, updates=1, seed=11)
     assert (output / 'results.jsonl').read_bytes() == rows
     sweep(grid, str(data), str(data), tmp_path / 'retry', config, updates=1, seed=11)
     retry = json.loads((tmp_path / 'retry/sweep.json').read_text())
-    assert retry['status'] == 'complete'
+    assert retry['run']['status'] == 'complete'
 
 
 def test_sweep_argument_dispatch(monkeypatch, run_cli):
@@ -781,11 +857,12 @@ def test_sweep_runs_grid(
 ):
     from tmt.blocks import BLOCKS
     from tmt.checkpoint import load_checkpoint
+    from tmt.config import group_model_config
     from tmt.runtime import sweep
 
     grid, config = tmp_path / 'grid.json', tmp_path / 'model.json'
     grid.write_text(json.dumps({'block': ['tmt-v0', 'tmt-v0-test'], 'seed': [11, 22]}))
-    config.write_text(json.dumps(tiny_settings))
+    config.write_text(json.dumps(group_model_config(tiny_settings)))
     training, development = tmp_path / 'train.bin', tmp_path / 'development.bin'
     training.write_bytes(b'\x00\x01\x02')
     development.write_bytes(b'\xf0\xf1\xf2\xf3')
@@ -805,42 +882,123 @@ def test_sweep_runs_grid(
     )
 
     rows = jsonl(output / 'results.jsonl')
-    assert [(row['settings']['block'], row['seed']) for row in rows] == [
+    assert [
+        (row['model']['block'], row['training']['seed']) for row in rows
+    ] == [
         ('tmt-v0', 11),
         ('tmt-v0', 22),
         ('tmt-v0-test', 11),
         ('tmt-v0-test', 22),
     ], 'sweep changed product order or per-axis seeds'
-    assert best == min(rows, key=lambda row: row['development_bpb'])
+    assert best == min(rows, key=lambda row: row['evaluation']['bpb'])
     assert json.dumps(best) in capsys.readouterr().out, 'best row was not reported'
+    sweep_record = json.loads((output / 'sweep.json').read_text())
+    assert set(sweep_record) == {
+        'model', 'hparams', 'grid', 'data', 'training', 'monitoring',
+        'progress', 'run',
+    }
+    assert sweep_record['progress'] == {'completed_runs': 4, 'current_run': 4}
+    assert sweep_record['run']['status'] == 'complete'
+    assert set(sweep_record['run']) == {'started_at', 'status', 'error'}
+    assert sweep_record['run']['error'] is None
+    assert sweep_record['training'] == {
+        'seed': 11,
+        'updates': 2,
+        'objective': 'tmt',
+        'resume': False,
+    }
+    assert sweep_record['data'] == {
+        'train': {'glob': str(training), 'files': [str(training.resolve())]},
+        'development': {
+            'glob': str(development),
+            'files': [str(development.resolve())],
+            'max_bytes': 4,
+        },
+        'evaluation': {
+            'glob': str(development),
+            'files': [str(development.resolve())],
+            'max_bytes': 3,
+        },
+    }
+    assert sweep_record['monitoring'] == {
+        'log_every': 1,
+        'save_every': 500,
+        'sample': {'every': 2, 'prompt': 'The ', 'seed': 11, 'bytes': 3},
+        'evaluation': {'every': 2},
+    }
+    assert sweep_record['grid'] == {
+        'block': ['tmt-v0', 'tmt-v0-test'],
+        'seed': [11, 22],
+    }
     for index, row in enumerate(rows, 1):
-        checkpoint = Path(row['checkpoint'])
+        checkpoint = Path(row['run']['checkpoint'])
         folder = checkpoint.parent / 'manifest'
         assert checkpoint.parent.name == f'run-{index:04d}'
-        assert row['objective'] == 'tmt'
-        assert row['development_targets'] == 3
-        assert row['temporal_gradient'] == ['tmt-v0']
-        assert row['trainable_parameters'] > 0
-        assert json.loads((folder / 'model.json').read_text()) == row['settings']
+        assert set(row) == {
+            'model', 'hparams', 'data', 'training', 'evaluation', 'run'
+        }
+        assert row['training']['objective'] == 'tmt'
+        assert row['evaluation']['targets'] == 3
+        assert math.isfinite(row['evaluation']['bpb'])
+        assert row['data'] == {
+            'train': {'glob': str(training)},
+            'development': {
+                'glob': str(development),
+                'max_bytes': 4,
+            },
+        }
+        assert row['run'] == {'index': index, 'checkpoint': str(checkpoint.resolve())}
+        assert row['model']['temporal_gradient'] == ['tmt-v0']
+        assert row['model']['trainable_parameters'] > 0
+        model_config = {
+            'model': {
+                'block': row['model']['block'],
+                'dimensions': row['model']['dimensions'],
+            },
+            'hparams': row['hparams'],
+        }
+        assert json.loads((folder / 'model.json').read_text()) == model_config
         manifest = json.loads((folder / 'run.json').read_text())
         assert set(manifest) == manifest_fields, 'run manifest fields differ'
         expected = {
-            'seed': row['seed'],
-            'updates': row['updates'],
-            'objective': row['objective'],
-            'data_glob': row['data_glob'],
-            'status': 'complete',
-            'last_checkpoint': str(checkpoint.resolve()),
-            'config': row['settings'],
-            'log_every': 1,
-            'resume': False,
-            'trainable_parameters': row['trainable_parameters'],
-            'temporal_gradient': row['temporal_gradient'],
-            'data_files': [str(training.resolve())],
-            'initial_optimizer_step': 0,
-            'completed_updates': row['updates'],
+            'training': {
+                'seed': row['training']['seed'],
+                'updates': row['training']['updates'],
+                'objective': row['training']['objective'],
+                'resume': False,
+            },
+            'data': {
+                'train': {
+                    'glob': str(training),
+                    'files': [str(training.resolve())],
+                },
+                'evaluation': {
+                    'glob': str(development),
+                    'files': [str(development.resolve())],
+                    'max_bytes': 3,
+                },
+            },
+            'monitoring': {
+                'log_every': 1,
+                'save_every': 500,
+                'sample': {'every': 2, 'prompt': 'The ', 'seed': 11, 'bytes': 3},
+                'evaluation': {'every': 2},
+            },
+            'progress': {
+                'completed_updates': 2,
+                'initial_optimizer_step': 0,
+                'optimizer_step': 2,
+            },
+            'run': {
+                'status': 'complete',
+                'last_checkpoint': str(checkpoint.resolve()),
+                'error': None,
+            },
         }
-        assert {k: manifest[k] for k in expected} == expected
+        for group, fields in expected.items():
+            assert {key: manifest[group][key] for key in fields} == fields
+        assert manifest['model'] == row['model']
+        assert manifest['hparams'] == row['hparams']
         assert [r['completed_updates'] for r in jsonl(folder / 'loss.jsonl')] == [1, 2]
         evaluation = jsonl(folder / 'evaluation.jsonl')
         assert [(r['completed_updates'], r['targets']) for r in evaluation] == [(2, 2)]
@@ -848,7 +1006,13 @@ def test_sweep_runs_grid(
         assert [(r['completed_updates'], r['bytes']) for r in samples] == [(2, 3)]
         assert len(Path(samples[0]['path']).read_bytes()) == 3
         model, settings = load_checkpoint(checkpoint)
-        assert settings == row['settings'], 'loaded checkpoint settings differ'
-        assert model.count() == row['trainable_parameters']
-        assert model.temporal_gradient == row['temporal_gradient']
+        expected_settings = {
+            'block': row['model']['block'],
+            **row['model']['dimensions'],
+            **row['hparams']['optimizer'],
+            **row['hparams']['sampling'],
+        }
+        assert settings == expected_settings, 'loaded checkpoint settings differ'
+        assert model.count() == row['model']['trainable_parameters']
+        assert model.temporal_gradient == row['model']['temporal_gradient']
         assert int(model.optimizer.state['step'].item()) == 2

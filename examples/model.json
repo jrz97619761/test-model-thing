@@ -1,12 +1,22 @@
 {
-  "dim": 512,
-  "layers": 16,
-  "spread": 32,
-  "block": "tmt-v0",
-  "temp": 0.75,
-  "rate": 0.0005,
-  "bound": [
-    40000,
-    120000
-  ]
+  "model": {
+    "block": "tmt-v0",
+    "dimensions": {
+      "dim": 512,
+      "layers": 16,
+      "spread": 32
+    }
+  },
+  "hparams": {
+    "optimizer": {
+      "rate": 0.0005,
+      "bound": [
+        40000,
+        120000
+      ]
+    },
+    "sampling": {
+      "temp": 0.75
+    }
+  }
 }

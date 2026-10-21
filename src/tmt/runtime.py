@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, Any
 from . import validation
 from .checkpoint import load_checkpoint, new_model, preserved_rng
 from .checkpoint import save_checkpoint as write_checkpoint
-from .config import load_config
-from .data import ByteFiles, documents
+from .config import group_model_config, load_config
+from .data import ByteFiles, DataOptions, documents
 from .records import (
     RunManifest,
     RunStatus,
@@ -65,15 +65,25 @@ def _training_sample(model: Model, prompt: str, count: int, seed: int) -> bytes:
 
 @dataclass(frozen=True)
 class MonitorOptions:
-    """Sample and evaluation settings shared by a training run and a sweep."""
+    """Sampling, evaluation timing, and reporting settings for a run."""
 
     sample_every: int | None = None
     sample_prompt: str = 'The '
     sample_seed: int = 11
     sample_bytes: int = 256
-    eval_data: str | None = None
     eval_every: int | None = None
-    eval_max_bytes: int = 8192
+    log_every: int = 100
+    save_every: int = 500
+
+
+@dataclass(frozen=True)
+class TrainingOptions:
+    """Update budget and objective settings for one run."""
+
+    updates: int
+    seed: int
+    ce_only: bool = False
+    resume: bool = False
 
 
 @dataclass
@@ -82,15 +92,10 @@ class TrainingRun:
 
     settings: dict[str, Any] | None
     path: str | PathLike[str]
-    pattern: str | PathLike[str]
-    updates: int
-    seed: int
-    ce_only: bool
-    resume: bool
-    log_every: int
+    data: DataOptions
+    options: TrainingOptions
     monitor: MonitorOptions
     new_run: bool = False
-    save_every: int = 500
     files: list[str] = field(default_factory=list)
     evaluation_data: list[bytes] | None = None
     model: Model = field(init=False)
@@ -114,20 +119,20 @@ class TrainingRun:
 
     def setup(self) -> None:
         """Load inputs and model, then create the run manifest paths."""
-        self.files = ByteFiles(self.pattern).paths
+        self.files = ByteFiles(self.data.pattern).paths
         evaluation_files = []
-        if self.monitor.eval_data is not None:
-            selection = ByteFiles(self.monitor.eval_data)
+        if self.data.eval_data is not None:
+            selection = ByteFiles(self.data.eval_data)
             evaluation_files = selection.paths
             self.evaluation_data = list(
-                selection.documents(self.monitor.eval_max_bytes)
+                selection.documents(self.data.eval_max_bytes)
             )
             validation.evaluation_targets(self.evaluation_data)
-        if self.resume:
+        if self.options.resume:
             self.model, self.settings = load_checkpoint(self.path)
         else:
-            self.model = new_model(self.settings, self.seed)
-        random.Random(self.seed).shuffle(self.files)
+            self.model = new_model(self.settings, self.options.seed)
+        random.Random(self.options.seed).shuffle(self.files)
 
         self.checkpoint = Path(self.path)
         self.checkpoint.parent.mkdir(parents=True, exist_ok=not self.new_run)
@@ -139,13 +144,13 @@ class TrainingRun:
             config=self.settings,
             trainable_parameters=self.model.count(),
             temporal_gradient=self.model.temporal_gradient,
-            seed=self.seed,
-            data_glob=self.pattern,
+            seed=self.options.seed,
+            data_glob=str(self.data.pattern),
             data_files=[str(Path(filename).resolve()) for filename in self.files],
-            updates=self.updates,
-            log_every=self.log_every,
-            objective='ce_only' if self.ce_only else 'tmt',
-            resume=self.resume,
+            updates=self.options.updates,
+            log_every=self.monitor.log_every,
+            objective='ce_only' if self.options.ce_only else 'tmt',
+            resume=self.options.resume,
             initial_optimizer_step=self.optimizer_step,
             sample=None
             if self.monitor.sample_every is None
@@ -159,16 +164,16 @@ class TrainingRun:
             if self.monitor.eval_every is None
             else {
                 'every': self.monitor.eval_every,
-                'data_glob': self.monitor.eval_data,
-                'max_bytes': self.monitor.eval_max_bytes,
+                'data_glob': str(self.data.eval_data),
+                'max_bytes': self.data.eval_max_bytes,
                 'data_files': [str(Path(name).resolve()) for name in evaluation_files],
             },
             started_at=datetime.now(timezone.utc).isoformat(),
             last_checkpoint=(
-                str(self.checkpoint.resolve()) if self.resume else None
+                str(self.checkpoint.resolve()) if self.options.resume else None
             ),
             optimizer_step=self.optimizer_step,
-            save_every=self.save_every,
+            save_every=self.monitor.save_every,
         )
         self.started = self.last_report = time.perf_counter()
         self.stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
@@ -189,7 +194,7 @@ class TrainingRun:
         row = {
             'completed_updates': self.completed,
             'optimizer_step': self.optimizer_step,
-            'objective': self.record['objective'],
+            'objective': 'ce_only' if self.options.ce_only else 'tmt',
             'loss': loss,
             'mean_loss': self.loss_sum / interval_updates,
             'mean_loss_components': {
@@ -202,7 +207,8 @@ class TrainingRun:
         }
         append_jsonl(self.metrics, row)
         print(
-            f'updates: {self.completed}, objective: {self.record["objective"]}, '
+            f'updates: {self.completed}, '
+            f'objective: {"ce_only" if self.options.ce_only else "tmt"}, '
             f'loss: {loss:.6f}, '
             f'mean loss: {row["mean_loss"]:.6f}, step: {row["optimizer_step"]}, '
             f'updates/s: {row["updates_per_second"]:.2f}',
@@ -267,9 +273,9 @@ class TrainingRun:
         if self.record is None:
             raise RuntimeError('training run is not ready to save')
         write_checkpoint(self.checkpoint, self.model, self.settings)
-        self.record['last_checkpoint'] = str(self.checkpoint.resolve())
-        self.record['completed_updates'] = self.completed
-        self.record['optimizer_step'] = self.optimizer_step
+        self.record['run']['last_checkpoint'] = str(self.checkpoint.resolve())
+        self.record['progress']['completed_updates'] = self.completed
+        self.record['progress']['optimizer_step'] = self.optimizer_step
         write_json(self.manifest, self.record)
         print(
             f'saved checkpoint: {self.checkpoint}, updates: {self.completed}, '
@@ -291,7 +297,7 @@ class TrainingRun:
 
     def after_update(self, end: bool, terminal_byte: int) -> None:
         """Run every action triggered by an optimizer update in stable order."""
-        if self.completed % self.log_every == 0:
+        if self.completed % self.monitor.log_every == 0:
             self.report_loss()
         if end:
             self.consume_terminal_byte(terminal_byte)
@@ -305,7 +311,7 @@ class TrainingRun:
             and self.completed % self.monitor.eval_every == 0
         ):
             self.report_evaluation()
-        if self.completed % self.save_every == 0:
+        if self.completed % self.monitor.save_every == 0:
             self.save_checkpoint()
 
     def one_data_pass(self) -> None:
@@ -327,7 +333,7 @@ class TrainingRun:
                     data[index],
                     data[index + 1],
                     end,
-                    self.ce_only,
+                    self.options.ce_only,
                     metrics=components,
                 )
                 self.completed += 1
@@ -337,9 +343,9 @@ class TrainingRun:
                     self.component_sums[name] = total + value
                 self.after_update(end, data[-1])
                 self.check_interrupt()
-                if self.completed >= self.updates:
+                if self.completed >= self.options.updates:
                     break
-            if self.completed >= self.updates:
+            if self.completed >= self.options.updates:
                 break
         self.check_interrupt()
         if self.completed == before_pass:
@@ -349,9 +355,9 @@ class TrainingRun:
         """Write final run status and any pending partial loss row."""
         if self.record is None:
             raise RuntimeError('training run is not ready to finalize')
-        self.record['status'] = self.status
-        self.record['completed_updates'] = self.completed
-        self.record['optimizer_step'] = self.optimizer_step
+        self.record['run']['status'] = self.status
+        self.record['progress']['completed_updates'] = self.completed
+        self.record['progress']['optimizer_step'] = self.optimizer_step
         write_json(self.manifest, self.record)
         if self.last_loss is not None and self.completed != self.logged:
             self.report_loss()
@@ -372,20 +378,24 @@ class TrainingRun:
                     previous_handlers[signum] = handler
                     signal.signal(signum, request_interrupt)
         try:
-            if self.resume and self.manifest.exists():
+            if self.options.resume and self.manifest.exists():
                 self.manifest.rename(
                     self.manifest_dir / f'run.replaced-{self.stamp}.json'
                 )
             for name in ('loss.jsonl', 'samples.jsonl', 'evaluation.jsonl'):
                 # A resume appends to the rows of earlier invocations.
-                with open(self.manifest_dir / name, 'a' if self.resume else 'w'):
+                with open(
+                    self.manifest_dir / name,
+                    'a' if self.options.resume else 'w',
+                ):
                     pass
             write_json(self.manifest, self.record)
             print(
-                f'run folder: {self.checkpoint.parent}, seed: {self.seed}, '
+                f'run folder: {self.checkpoint.parent}, '
+                f'seed: {self.options.seed}, '
                 f'config: {json.dumps(self.settings)}'
             )
-            while self.completed < self.updates:
+            while self.completed < self.options.updates:
                 self.one_data_pass()
             if (
                 self.monitor.eval_every is not None
@@ -402,7 +412,10 @@ class TrainingRun:
             raise
         except Exception as error:
             self.status = 'failed'
-            self.record['error'] = {'type': type(error).__name__, 'message': str(error)}
+            self.record['run']['error'] = {
+                'type': type(error).__name__,
+                'message': str(error),
+            }
             raise
         finally:
             try:
@@ -444,25 +457,39 @@ def train(
         sample_prompt=sample_prompt,
         sample_seed=sample_seed,
         sample_bytes=sample_bytes,
-        eval_data=eval_data,
         eval_every=eval_every,
+        log_every=log_every,
+        save_every=save_every,
+    )
+    data = DataOptions(
+        pattern=pattern,
+        eval_data=eval_data,
         eval_max_bytes=eval_max_bytes,
     )
-    validation.training_options(seed, updates, log_every)
-    validation.positive(save_every, 'save-every')
-    validation.monitoring(**dataclasses.asdict(monitor))
-    run = TrainingRun(
-        settings=settings,
-        path=path,
-        pattern=pattern,
+    options = TrainingOptions(
         updates=updates,
         seed=seed,
         ce_only=ce_only,
         resume=resume,
-        log_every=log_every,
+    )
+    validation.training_options(seed, updates, log_every)
+    validation.positive(save_every, 'save-every')
+    validation.monitoring(
+        monitor.sample_every,
+        monitor.sample_prompt,
+        monitor.sample_seed,
+        monitor.sample_bytes,
+        data.eval_data,
+        monitor.eval_every,
+        data.eval_max_bytes,
+    )
+    run = TrainingRun(
+        settings=settings,
+        path=path,
+        data=data,
+        options=options,
         monitor=monitor,
         new_run=new_run,
-        save_every=save_every,
     )
     run.setup()
     return run.run()
@@ -502,8 +529,20 @@ def inspect_checkpoint(checkpoint: str | PathLike[str]) -> dict[str, Any]:
     manifest = Path(checkpoint).parent / 'manifest' / 'run.json'
     if manifest.is_file():
         record = read_json(manifest)
-        fields = ('status', 'objective', 'seed', 'completed_updates')
-        summary['run'] = {name: record.get(name) for name in fields}
+        validation.require(
+            isinstance(record, dict)
+            and all(
+                isinstance(record.get(name), dict)
+                for name in ('run', 'training', 'progress')
+            ),
+            'run manifest must contain grouped run, training, and progress objects',
+        )
+        summary['run'] = {
+            'status': record['run'].get('status'),
+            'objective': record['training'].get('objective'),
+            'seed': record['training'].get('seed'),
+            'completed_updates': record['progress'].get('completed_updates'),
+        }
     return summary
 
 
@@ -590,11 +629,8 @@ def _resolve_sweep_candidate(
 def _run_sweep_candidate(
     candidate: SweepCandidate,
     output: Path,
-    pattern: str | PathLike[str],
-    updates: int,
-    ce_only: bool,
-    log_every: int,
-    save_every: int,
+    data: DataOptions,
+    options: TrainingOptions,
     monitor: MonitorOptions,
     development_data: list[bytes],
     evaluate: Callable[[Model, list[bytes]], dict[str, Any]],
@@ -604,18 +640,26 @@ def _run_sweep_candidate(
     run_path.mkdir(parents=True, exist_ok=True)
     manifest_dir = run_path / 'manifest'
     manifest_dir.mkdir(parents=True, exist_ok=True)
-    write_json(manifest_dir / 'model.json', candidate.settings)
+    write_json(manifest_dir / 'model.json', group_model_config(candidate.settings))
     checkpoint = run_path / 'model.safetensors'
+    candidate_options = dataclasses.replace(options, seed=candidate.seed)
     model = train(
         candidate.settings,
         checkpoint,
-        pattern,
-        updates,
-        candidate.seed,
-        ce_only=ce_only,
-        log_every=log_every,
-        save_every=save_every,
-        **dataclasses.asdict(monitor),
+        data.pattern,
+        candidate_options.updates,
+        candidate_options.seed,
+        ce_only=candidate_options.ce_only,
+        resume=candidate_options.resume,
+        log_every=monitor.log_every,
+        sample_every=monitor.sample_every,
+        sample_prompt=monitor.sample_prompt,
+        sample_seed=monitor.sample_seed,
+        sample_bytes=monitor.sample_bytes,
+        eval_data=data.eval_data,
+        eval_every=monitor.eval_every,
+        eval_max_bytes=data.eval_max_bytes,
+        save_every=monitor.save_every,
     )
     score = evaluate(model, development_data)
     return SweepExecution(model=model, checkpoint=checkpoint, score=score)
@@ -624,30 +668,39 @@ def _run_sweep_candidate(
 def _sweep_result(
     candidate: SweepCandidate,
     run: SweepExecution,
-    pattern: str | PathLike[str],
+    data: DataOptions,
     development: str | PathLike[str],
     max_bytes: int,
-    updates: int,
-    ce_only: bool,
+    options: TrainingOptions,
 ) -> dict[str, Any]:
     """Build the stable results row for one completed sweep candidate."""
     model = run.model
     score = run.score
     checkpoint = run.checkpoint
+    grouped_model = group_model_config(candidate.settings)
+    model_group = dict(grouped_model['model'])
+    extensions = model_group.pop('extensions', None)
+    model_group['trainable_parameters'] = model.count()
+    model_group['temporal_gradient'] = model.temporal_gradient
+    if extensions is not None:
+        model_group['extensions'] = extensions
     return {
-        'run': candidate.index,
-        'settings': candidate.settings,
-        'trainable_parameters': model.count(),
-        'temporal_gradient': model.temporal_gradient,
-        'seed': candidate.seed,
-        'updates': updates,
-        'objective': 'ce_only' if ce_only else 'tmt',
-        'data_glob': pattern,
-        'development_glob': development,
-        'development_max_bytes': max_bytes,
-        'development_targets': score['targets'],
-        'development_bpb': score['bpb'],
-        'checkpoint': str(checkpoint.resolve()),
+        'model': model_group,
+        'hparams': grouped_model['hparams'],
+        'data': {
+            'train': {'glob': str(data.pattern)},
+            'development': {'glob': str(development), 'max_bytes': max_bytes},
+        },
+        'training': {
+            'seed': candidate.seed,
+            'updates': options.updates,
+            'objective': 'ce_only' if options.ce_only else 'tmt',
+        },
+        'evaluation': {'targets': score['targets'], 'bpb': score['bpb']},
+        'run': {
+            'index': candidate.index,
+            'checkpoint': str(checkpoint.resolve()),
+        },
     }
 
 
@@ -678,24 +731,48 @@ def sweep(
         sample_prompt=sample_prompt,
         sample_seed=sample_seed,
         sample_bytes=sample_bytes,
-        eval_data=eval_data,
         eval_every=eval_every,
+        log_every=log_every,
+        save_every=save_every,
+    )
+    data = DataOptions(
+        pattern=pattern,
+        eval_data=eval_data,
         eval_max_bytes=eval_max_bytes,
     )
-    validation.training_options(seed, updates, log_every)
+    options = TrainingOptions(
+        updates=updates,
+        seed=seed,
+        ce_only=ce_only,
+    )
+    validation.training_options(seed, updates, monitor.log_every)
     validation.positive(max_bytes, 'max-bytes')
-    validation.positive(save_every, 'save-every')
-    validation.monitoring(**dataclasses.asdict(monitor))
+    validation.positive(monitor.save_every, 'save-every')
+    validation.monitoring(
+        monitor.sample_every,
+        monitor.sample_prompt,
+        monitor.sample_seed,
+        monitor.sample_bytes,
+        data.eval_data,
+        monitor.eval_every,
+        data.eval_max_bytes,
+    )
     from .benchmark import evaluate
 
     settings = load_config(config)
     grid = read_json(grid_path)
     validation.sweep_grid(grid, settings)
     keys = list(grid)
-    ByteFiles(pattern)
-    if eval_data is not None:
-        validation.evaluation_targets(documents(eval_data, eval_max_bytes))
-    development_data = list(documents(development, max_bytes))
+    train_files = ByteFiles(data.pattern).paths
+    evaluation_files = []
+    if data.eval_data is not None:
+        evaluation_selection = ByteFiles(data.eval_data)
+        evaluation_files = evaluation_selection.paths
+        validation.evaluation_targets(
+            evaluation_selection.documents(data.eval_max_bytes)
+        )
+    development_selection = ByteFiles(development)
+    development_data = list(development_selection.documents(max_bytes))
     validation.evaluation_targets(development_data)
     output_path = Path(output)
     if output_path.exists() and any(output_path.iterdir()):
@@ -714,29 +791,40 @@ def sweep(
         seed=seed,
         updates=updates,
         objective='ce_only' if ce_only else 'tmt',
-        data_glob=pattern,
-        development_glob=development,
+        data_glob=str(pattern),
+        development_glob=str(development),
         development_max_bytes=max_bytes,
         log_every=log_every,
         save_every=save_every,
         started_at=datetime.now(timezone.utc).isoformat(),
-        **dataclasses.asdict(monitor),
+        sample_every=monitor.sample_every,
+        sample_prompt=monitor.sample_prompt,
+        sample_seed=monitor.sample_seed,
+        sample_bytes=monitor.sample_bytes,
+        eval_data=None if data.eval_data is None else str(data.eval_data),
+        eval_every=monitor.eval_every,
+        eval_max_bytes=data.eval_max_bytes,
+        data_files=[str(Path(filename).resolve()) for filename in train_files],
+        evaluation_files=[
+            str(Path(filename).resolve()) for filename in evaluation_files
+        ],
+        development_files=[
+            str(Path(filename).resolve())
+            for filename in development_selection.paths
+        ],
     )
     write_json(sweep_manifest, record)
     try:
         for index, values in enumerate(
             itertools.product(*(grid[key] for key in keys)), 1
         ):
-            record['current_run'] = index
+            record['progress']['current_run'] = index
             candidate = _resolve_sweep_candidate(index, values, keys, settings, seed)
             run = _run_sweep_candidate(
                 candidate,
                 output_path,
-                pattern,
-                updates,
-                ce_only,
-                log_every,
-                save_every,
+                data,
+                options,
                 monitor,
                 development_data,
                 evaluate,
@@ -744,26 +832,28 @@ def sweep(
             row = _sweep_result(
                 candidate,
                 run,
-                pattern,
+                data,
                 development,
                 max_bytes,
-                updates,
-                ce_only,
+                options,
             )
             append_jsonl(results_path, row)
             rows.append(row)
-            record['completed_runs'] = len(rows)
+            record['progress']['completed_runs'] = len(rows)
             write_json(sweep_manifest, record)
-        record['status'] = 'complete'
+        record['run']['status'] = 'complete'
     except (Exception, KeyboardInterrupt) as error:
-        record['status'] = (
+        record['run']['status'] = (
             'interrupted' if isinstance(error, KeyboardInterrupt) else 'failed'
         )
-        record['error'] = {'type': type(error).__name__, 'message': str(error)}
+        record['run']['error'] = {
+            'type': type(error).__name__,
+            'message': str(error),
+        }
         raise
     finally:
         write_json(sweep_manifest, record)
 
-    best = min(rows, key=lambda row: row['development_bpb'])
+    best = min(rows, key=lambda row: row['evaluation']['bpb'])
     print(f'best row: {json.dumps(best)}')
     return best

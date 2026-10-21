@@ -93,6 +93,40 @@ FILE_FAULTS = {  # id: message fragments
 }
 
 
+def grouped_overrides(settings):
+    model = {}
+    dimensions = {
+        name: value
+        for name, value in settings.items()
+        if name in {'dim', 'layers', 'spread'}
+    }
+    if dimensions:
+        model['dimensions'] = dimensions
+    if 'block' in settings:
+        model['block'] = settings['block']
+    extensions = {
+        name: value
+        for name, value in settings.items()
+        if name not in {'dim', 'layers', 'spread', 'block', 'temp', 'rate', 'bound'}
+    }
+    if extensions:
+        model['extensions'] = extensions
+
+    hparams = {}
+    optimizer = {
+        name: value for name, value in settings.items() if name in {'rate', 'bound'}
+    }
+    if optimizer:
+        hparams['optimizer'] = optimizer
+    if 'temp' in settings:
+        hparams['sampling'] = {'temp': settings['temp']}
+
+    return {
+        **({'model': model} if model else {}),
+        **({'hparams': hparams} if hparams else {}),
+    }
+
+
 def test_load_config(tmp_path, monkeypatch):
     import inspect
 
@@ -123,14 +157,28 @@ def test_load_config(tmp_path, monkeypatch):
     path = tmp_path / 'model.json'
     path.write_text('{}')
     assert load_config(path) == defaults
-    path.write_text('{"dim": 4}')
+    path.write_text(json.dumps({'model': {'dimensions': {'dim': 4}}}))
     settings = load_config(path)
     partial = {'dim': 4, 'layers': 16, 'bound': [40000, 120000]}
     assert {name: settings[name] for name in partial} == partial
     limits = {'dim': 1, 'layers': 1, 'spread': 1, 'temp': 0, 'rate': 1, 'bound': [0, 1]}
-    path.write_text(json.dumps(limits))
+    path.write_text(json.dumps(grouped_overrides(limits)))
     settings = load_config(path)
     assert {name: settings[name] for name in limits} == limits
+
+    grouped = {
+        'model': {'dimensions': {'dim': 4}},
+        'hparams': {'optimizer': {'bound': [40000, 120000]}},
+    }
+    path.write_text(json.dumps(grouped))
+    settings = load_config(path)
+    assert settings['dim'] == 4
+    assert settings['bound'] == [40000, 120000]
+    assert {name: settings[name] for name in defaults} == {
+        **defaults,
+        'dim': 4,
+    }
+
     monkeypatch.setitem(config.MODEL_DEFAULTS, 'extra', 17)
     assert load_config()['extra'] == 17
 
@@ -143,7 +191,7 @@ def test_invalid_config_values(tmp_path, tiny_settings, name, value):
     from tmt.config import load_config
 
     path = tmp_path / 'model.json'
-    path.write_text(json.dumps({name: value}))
+    path.write_text(json.dumps(grouped_overrides({name: value})))
     with pytest.raises(ValueError, match=f'model config.{name}'):
         load_config(path)
     settings = dict(tiny_settings, **{name: value})
@@ -182,7 +230,7 @@ def test_extension_fields(monkeypatch, tmp_path, default, value, message):
         list(default) if isinstance(default, tuple) else default
     )
     path = tmp_path / 'model.json'
-    path.write_text(json.dumps({'extra': value}))
+    path.write_text(json.dumps({'model': {'extensions': {'extra': value}}}))
     with pytest.raises(ValueError, match=f'model config.extra.*{message}'):
         load_config(path)
     raw = json.dumps({'version': 1, 'model': {**settings, 'extra': value}})
@@ -208,17 +256,98 @@ def test_load_config_rejects_bad_files(tmp_path, contents, error, message):
         load_config(path)
 
 
-def test_init_writes_templates(run_cli, tmp_path, manifest_fields):
-    import inspect
-
+@pytest.mark.parametrize(
+    ('contents', 'message'),
+    [
+        ('{"model": {"dimensions": {"unknown": 1}}}',
+         "model config.model.dimensions has unknown field 'unknown'"),
+        ('{"hparams": {"optimizer": {"unknown": 1}}}',
+         "model config.hparams.optimizer has unknown field 'unknown'"),
+        ('{"model": {}, "dim": 4}',
+         "model config has unknown field 'dim'"),
+        ('{"model": {}, "other": 1}',
+         "model config has unknown field 'other'"),
+        ('{"model": []}', 'model config.model must be an object'),
+    ],
+    ids=[
+        'unknown-dimension',
+        'unknown-optimizer-setting',
+        'flat-field-in-grouped-config',
+        'unknown-group',
+        'bad-group-type',
+    ],
+)
+def test_load_config_rejects_invalid_grouped_files(tmp_path, contents, message):
     from tmt.config import load_config
-    from tmt.model import Model
+
+    path = tmp_path / 'model.json'
+    path.write_text(contents)
+    with pytest.raises(ValueError, match=message):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ('settings', 'unknown_field'),
+    [
+        ({'dim': 4}, 'dim'),
+        (
+            {
+                'dim': 512,
+                'layers': 16,
+                'spread': 32,
+                'temp': 0.75,
+                'rate': 0.0005,
+                'bound': [40000, 120000],
+                'block': 'tmt-v0',
+            },
+            'block',
+        ),
+        (
+            {'model': {'dimensions': {'dim': 4}}, 'dim': 8},
+            'dim',
+        ),
+    ],
+    ids=['partial-flat', 'full-flat', 'mixed-flat-and-grouped'],
+)
+def test_load_config_rejects_flat_fields(tmp_path, settings, unknown_field):
+    from tmt.config import load_config
+
+    path = tmp_path / 'model.json'
+    path.write_text(json.dumps(settings))
+    with pytest.raises(
+        ValueError,
+        match=f"model config has unknown field '{unknown_field}'",
+    ):
+        load_config(path)
+
+
+def test_grouped_config_round_trip_preserves_values_and_extensions(tmp_path, monkeypatch):
+    from tmt.config import MODEL_DEFAULTS, group_model_config, load_config
+
+    monkeypatch.setitem(MODEL_DEFAULTS, 'extra', (3, 5))
+    settings = {
+        **load_config(), 'dim': 8, 'layers': 2, 'spread': 4,
+        'temp': 0.2, 'rate': 0.01, 'bound': [2, 7], 'extra': [11, 13],
+    }
+    path = tmp_path / 'model.json'
+    path.write_text(json.dumps(group_model_config(settings)))
+    assert load_config(path) == settings
+    grouped = json.loads(path.read_text())
+    assert grouped['model']['extensions'] == {'extra': [11, 13]}
+    assert grouped['hparams'] == {
+        'optimizer': {'rate': 0.01, 'bound': [2, 7]},
+        'sampling': {'temp': 0.2},
+    }
+
+
+def test_init_writes_templates(run_cli, tmp_path, manifest_fields):
+    from tmt.config import group_model_config, load_config
 
     repo = Path(__file__).resolve().parents[1]
     assert run_cli('init')[0] == 0
     saved = json.loads((tmp_path / 'model.json').read_text())
-    assert saved == load_config()
-    assert set(saved) == set(inspect.signature(Model).parameters)
+    assert saved == group_model_config(load_config())
+    assert set(saved) == {'model', 'hparams'}
     templates = {tmp_path / n for n in ('model.json', 'grid.json', 'run.example.json')}
     assert set(tmp_path.rglob('*.json')) == templates
     for name in ('data/train', 'data/dev', 'runs'):
@@ -234,25 +363,40 @@ def test_init_writes_templates(run_cli, tmp_path, manifest_fields):
     template = json.loads((tmp_path / 'run.example.json').read_text())
     assert template == json.loads((repo / 'examples' / 'run.example.json').read_text())
     assert set(template) == manifest_fields
-    expected = {
-        'config': saved,
-        'seed': 11,
+    assert template['model'] == {
+        'block': 'tmt-v0',
+        'dimensions': {'dim': 512, 'layers': 16, 'spread': 32},
         'trainable_parameters': None,
         'temporal_gradient': None,
-        'data_glob': 'data/train/*',
-        'data_files': [],
+    }
+    assert template['hparams'] == saved['hparams']
+    assert template['data'] == {
+        'train': {'glob': 'data/train/*', 'files': []},
+        'evaluation': None,
+    }
+    assert template['training'] == {
+        'seed': 11,
         'updates': 1000,
         'objective': 'tmt',
-        'completed_updates': 0,
         'resume': False,
-        'initial_optimizer_step': 0,
-        'started_at': None,
+    }
+    assert template['monitoring'] == {
+        'log_every': 100,
+        'save_every': 500,
         'sample': None,
         'evaluation': None,
+    }
+    assert template['progress'] == {
+        'completed_updates': 0,
+        'initial_optimizer_step': 0,
+        'optimizer_step': 0,
+    }
+    assert template['run'] == {
+        'started_at': None,
         'status': 'running',
         'last_checkpoint': None,
+        'error': None,
     }
-    assert {name: template[name] for name in expected} == expected
 
     explicit = tmp_path / 'custom' / 'settings.json'
     assert run_cli('init', '--output', str(explicit))[0] == 0
@@ -260,8 +404,15 @@ def test_init_writes_templates(run_cli, tmp_path, manifest_fields):
     assert set(tmp_path.rglob('*.json')) == templates | {explicit}
 
     assert load_config(repo / 'examples' / 'model.json') == load_config()
-    tiny = json.loads((repo / 'examples' / 'tiny-model.json').read_text())
-    assert tiny == {**saved, 'dim': 4, 'layers': 1, 'spread': 4}
+    tiny_path = repo / 'examples' / 'tiny-model.json'
+    assert load_config(tiny_path) == {
+        **load_config(),
+        'dim': 4,
+        'layers': 1,
+        'spread': 4,
+    }
+    tiny = json.loads(tiny_path.read_text())
+    assert tiny == group_model_config(load_config(tiny_path))
     assert json.loads((repo / 'examples' / 'grid.json').read_text()) == grid
 
 

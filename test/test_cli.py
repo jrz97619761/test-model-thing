@@ -509,7 +509,7 @@ def test_invalid_option_values(workspace, run_cli, case):
     """Each input error stops before model work and leaves no output."""
     extra, message = INVALID_OPTION_VALUES[case]
     command = 'train' if case.startswith('run-') else case.split('-')[0]
-    (workspace / 'bad.json').write_text('{"dim": true}')
+    (workspace / 'bad.json').write_text('{"model": {"dimensions": {"dim": true}}}')
     (workspace / 'syntax.json').write_text('{"dim": 4,')
     (workspace / 'short.bin').write_bytes(b'x')
     kept = case in ('generate-negative-bytes', 'generate-temperature-negative')
@@ -552,10 +552,10 @@ def test_input_errors_leave_no_output(workspace, run_cli, case):
     assert not output.exists()
     assert run_cli(*valid)[0] == 0
     record = json.loads(manifest.read_text())
-    assert record['status'] == 'complete'
+    assert record['run']['status'] == 'complete'
     if command == 'sweep':
-        assert record['completed_runs'] == 2
-        assert record['error'] is None
+        assert record['progress']['completed_runs'] == 2
+        assert record['run']['error'] is None
 
 
 def test_fresh_train_keeps_existing_checkpoint(
@@ -649,13 +649,15 @@ def test_generate_temperature_floor(checkpoint, tmp_path):
 
 
 def test_inspect_command(workspace, checkpoint, run_cli):
+    from tmt.config import load_config
+
     code, _, stderr = run_cli(
         'train', '--data', 'train.bin', '--run', 'a', '--updates', '3', '--seed', '11'
     )
     assert code == 0, stderr
     code, stdout, stderr = run_cli('inspect', 'runs/a/model.safetensors')
     assert (code, stderr) == (0, '')
-    settings = json.loads((workspace / 'model.json').read_text())
+    settings = load_config(workspace / 'model.json')
     assert stdout.splitlines() == [
         f'checkpoint: runs/a/model.safetensors, step: 3, '
         f'trainable parameters: {checkpoint.model.count()}',
@@ -670,6 +672,53 @@ def test_inspect_command(workspace, checkpoint, run_cli):
     code, stdout, stderr = run_cli('inspect', 'invalid.safetensors')
     assert (code, stdout) == (1, '')
     assert stderr.startswith('tmt: error: invalid checkpoint:')
+
+
+def test_inspect_grouped_manifest(checkpoint, run_cli):
+    from tmt.runtime import inspect_checkpoint
+
+    summary = {
+        'status': 'complete', 'objective': 'ce_only', 'seed': 17,
+        'completed_updates': 23,
+    }
+    record = {
+        'run': {'status': summary['status']},
+        'training': {'objective': summary['objective'], 'seed': summary['seed']},
+        'progress': {'completed_updates': summary['completed_updates']},
+    }
+    manifest = checkpoint.path.parent / 'manifest/run.json'
+    manifest.parent.mkdir()
+    manifest.write_text(json.dumps(record))
+
+    assert inspect_checkpoint(checkpoint.path)['run'] == summary
+    code, stdout, stderr = run_cli('inspect', str(checkpoint.path))
+    assert (code, stderr) == (0, '')
+    assert stdout.splitlines()[-1] == (
+        'run status: complete, objective: ce_only, seed: 17, updates: 23'
+    )
+
+
+@pytest.mark.parametrize(
+    'record',
+    [
+        {'status': 'complete', 'objective': 'tmt', 'seed': 11, 'completed_updates': 0},
+        {'run': {}, 'training': {}, 'progress': None},
+        [],
+    ],
+    ids=['flat', 'invalid-group', 'not-object'],
+)
+def test_inspect_rejects_invalid_manifest(checkpoint, run_cli, record):
+    from tmt.runtime import inspect_checkpoint
+
+    manifest = checkpoint.path.parent / 'manifest/run.json'
+    manifest.parent.mkdir()
+    manifest.write_text(json.dumps(record))
+    message = 'run manifest must contain grouped run, training, and progress objects'
+    with pytest.raises(ValueError, match=message):
+        inspect_checkpoint(checkpoint.path)
+    code, stdout, stderr = run_cli('inspect', str(checkpoint.path))
+    assert (code, stdout) == (1, '')
+    assert stderr.strip() == f'tmt: error: {message}'
 
 
 def test_evaluate_command(workspace, checkpoint, run_cli):
@@ -730,8 +779,8 @@ ARGV = ['train', '--data', 'train.bin', '--run', 'interrupted',
     checkpoint = workspace / 'runs/interrupted/model.safetensors'
     assert 'saved checkpoint:' in result.stdout
     record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
-    assert record['status'] == 'interrupted'
-    assert record['completed_updates'] == 1
+    assert record['run']['status'] == 'interrupted'
+    assert record['progress']['completed_updates'] == 1
     loaded, settings = load_checkpoint(checkpoint)
     expected = train(
         settings, workspace / 'reference/model.safetensors', 'train.bin', 1, 11
@@ -785,7 +834,7 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
     assert '## init' in cli('help', 'init').stdout
     cli('init')
     (root / 'model.json').write_text(
-        '{"dim":4,"layers":1,"spread":4,"block":"tmt-v0"}'
+        '{"model":{"dimensions":{"dim":4,"layers":1,"spread":4}}}'
     )
     (root / 'data/train/tiny.bin').write_bytes(b'abcd')
     (root / 'data/dev/tiny.bin').write_bytes(b'wxyz')
@@ -821,18 +870,18 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
     assert model.optimizer.state['step'].item() == 3
     manifest = checkpoint.parent / 'manifest/run.json'
     fresh = json.loads(manifest.read_text())
-    expected = {
-        'data_glob': 'data/train/*',
-        'data_files': [str((root / 'data/train/tiny.bin').resolve())],
-        'updates': 3,
-        'completed_updates': 3,
-        'objective': 'tmt',
-        'resume': False,
-        'initial_optimizer_step': 0,
-        'trainable_parameters': model.count(),
-        'temporal_gradient': model.temporal_gradient,
+    assert fresh['data']['train'] == {
+        'glob': 'data/train/*',
+        'files': [str((root / 'data/train/tiny.bin').resolve())],
     }
-    assert {k: fresh[k] for k in expected} == expected
+    assert fresh['training'] == {
+        'seed': 11, 'updates': 3, 'objective': 'tmt', 'resume': False,
+    }
+    assert fresh['progress'] == {
+        'completed_updates': 3, 'initial_optimizer_step': 0, 'optimizer_step': 3,
+    }
+    assert fresh['model']['trainable_parameters'] == model.count()
+    assert fresh['model']['temporal_gradient'] == model.temporal_gradient
     (root / 'data/resume').mkdir()
     (root / 'data/resume/next.bin').write_bytes(b'wxyz')
     cli(
@@ -842,22 +891,20 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
     assert load_checkpoint(checkpoint)[0].optimizer.state['step'].item() == 5
     record = json.loads(manifest.read_text())
     assert set(record) == manifest_fields
-    expected = {
-        'status': 'complete',
-        'config': settings,
-        'last_checkpoint': str(checkpoint.resolve()),
-        'trainable_parameters': model.count(),
-        'temporal_gradient': model.temporal_gradient,
-        'data_glob': 'data/resume/*',
-        'data_files': [str((root / 'data/resume/next.bin').resolve())],
-        'updates': 2,
-        'completed_updates': 2,
-        'seed': 99,
-        'objective': 'ce_only',
-        'resume': True,
-        'initial_optimizer_step': 3,
+    assert record['run']['status'] == 'complete'
+    assert record['run']['last_checkpoint'] == str(checkpoint.resolve())
+    assert record['model'] == fresh['model']
+    assert record['hparams'] == fresh['hparams']
+    assert record['data']['train'] == {
+        'glob': 'data/resume/*',
+        'files': [str((root / 'data/resume/next.bin').resolve())],
     }
-    assert {k: record[k] for k in expected} == expected
+    assert record['training'] == {
+        'seed': 99, 'updates': 2, 'objective': 'ce_only', 'resume': True,
+    }
+    assert record['progress'] == {
+        'completed_updates': 2, 'initial_optimizer_step': 3, 'optimizer_step': 5,
+    }
     cli(
         *('evaluate', str(checkpoint), '--data', 'data/train/*', '--windows', '1', '2'),
         *('--output', 'score.json'),
