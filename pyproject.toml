@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "test-model-thing"
+version = "1.0.0"
+description = "Experiments for the TMT byte model"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.15"
+dependencies = ["mlx"]
+
+[project.optional-dependencies]
+test = ["pytest>=9.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+
+[project.scripts]
+tmt = "tmt.cli:console_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tmt = ["commands.md"]
