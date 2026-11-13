@@ -171,7 +171,7 @@ def test_training_updates_parameters_and_optimizer(
     monkeypatch.setattr(model, 'update_gradients', capture)
     for current, target in [(65, 66), (66, 67), (67, 68)]:
         output, _, loss = model.train_step(current, target, False)
-        assert output.shape == (256,)
+        assert output.shape == (257,)
         assert mx.isfinite(loss).item()
     assert model.optimizer.state['step'].item() == 3
     assert model.compiled is not None

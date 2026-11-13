@@ -46,6 +46,7 @@ def evaluation_model():
     class FakeModel:
         def __init__(self):
             self.blocks = [FakeBlock()]
+            self.tokenizer = None
             self.uniform = False
 
         def reset(self):

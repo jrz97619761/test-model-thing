@@ -21,7 +21,7 @@ from . import validation
 from .checkpoint import load_checkpoint, new_model, preserved_rng
 from .checkpoint import save_checkpoint as write_checkpoint
 from .config import group_model_config, load_config
-from .data import ByteFiles, DataOptions, documents
+from .data import ByteFiles, DataOptions, decode_token, documents, encode_document
 from .records import (
     RunManifest,
     RunStatus,
@@ -47,15 +47,17 @@ def _training_sample(model: Model, prompt: str, count: int, seed: int) -> bytes:
     snapshot = model.snapshot_state()
     try:
         model.reset()
-        for byte in prompt.encode('utf-8'):
-            _, (logits, _) = model.step(mx.array(byte), frozen=True)
+        for token in encode_document(model, prompt.encode('utf-8')):
+            _, (logits, _) = model.step(mx.array(token), frozen=True)
         key = mx.random.key(seed)
         generated = bytearray()
-        for _ in range(count):
+        while len(generated) < count:
             key, sample_key = mx.random.split(key)
-            byte = int(model.sample(logits, key=sample_key).item())
-            generated.append(byte)
-            _, (logits, _) = model.step(mx.array(byte), frozen=True)
+            token = int(model.sample(logits, key=sample_key).item())
+            if token == 256:
+                break
+            generated.extend(decode_token(model, token)[:count - len(generated)])
+            _, (logits, _) = model.step(mx.array(token), frozen=True)
         model.eval_state()
         return bytes(generated)
     finally:
@@ -282,25 +284,16 @@ class TrainingRun:
             f'step: {self.optimizer_step}'
         )
 
-    def consume_terminal_byte(self, byte: int) -> None:
-        """Advance frozen recurrent state over a document's final byte."""
-        import mlx.core as mx
-
-        self.model.step(mx.array(byte), frozen=True)
-        self.model.eval_state()
-
     def check_interrupt(self) -> None:
         """Save at a complete update boundary after a SIGINT request."""
         if self.interrupted:
             self.save_checkpoint()
             raise KeyboardInterrupt
 
-    def after_update(self, end: bool, terminal_byte: int) -> None:
+    def after_update(self) -> None:
         """Run every action triggered by an optimizer update in stable order."""
         if self.completed % self.monitor.log_every == 0:
             self.report_loss()
-        if end:
-            self.consume_terminal_byte(terminal_byte)
         if (
             self.monitor.sample_every is not None
             and self.completed % self.monitor.sample_every == 0
@@ -319,19 +312,16 @@ class TrainingRun:
         before_pass = self.completed
         for filename in self.files:
             self.check_interrupt()
-            data = Path(filename).read_bytes()
+            data = encode_document(self.model, Path(filename).read_bytes())
             if not data:
                 continue
             self.model.reset()
-            if len(data) == 1:
-                self.consume_terminal_byte(data[0])
-                continue
-            for index in range(len(data) - 1):
-                end = index == len(data) - 2
+            for index in range(len(data)):
+                end = index == len(data) - 1
                 components: dict[str, float] = {}
                 _, _, self.last_loss = self.model.train_step(
                     data[index],
-                    data[index + 1],
+                    256 if end else data[index + 1],
                     end,
                     self.options.ce_only,
                     metrics=components,
@@ -341,7 +331,7 @@ class TrainingRun:
                 for name, value in components.items():
                     total = self.component_sums.get(name, 0.0)
                     self.component_sums[name] = total + value
-                self.after_update(end, data[-1])
+                self.after_update()
                 self.check_interrupt()
                 if self.completed >= self.options.updates:
                     break
@@ -451,7 +441,7 @@ def train(
     new_run: bool = False,
     save_every: int = 500,
 ) -> Model:
-    """Train on adjacent raw-byte pairs and record the run manifest."""
+    """Train on adjacent token pairs and record the run manifest."""
     monitor = MonitorOptions(
         sample_every=sample_every,
         sample_prompt=sample_prompt,
@@ -556,7 +546,7 @@ def generate(
     temperature: float | None = None,
     log_every: int = 1000,
 ) -> bytes:
-    """Replay a UTF-8 prompt and write a fixed count of sampled bytes."""
+    """Replay a UTF-8 prompt and write up to count sampled bytes."""
     validation.seed(seed)
     validation.require(prompt, 'generation needs a nonempty prompt')
     validation.require(count >= 0, 'bytes must be nonnegative')
@@ -577,13 +567,16 @@ def generate(
     generated = bytearray()
     with preserved_rng():
         mx.random.seed(seed)
-        for byte in prompt.encode('utf-8'):
-            _, (logits, _) = model.step(mx.array(byte), frozen=True)
-        for _ in range(count):
-            byte = int(model.sample(logits).item())
-            generated.append(byte)
-            _, (logits, _) = model.step(mx.array(byte), frozen=True)
-            if len(generated) % log_every == 0:
+        for token in encode_document(model, prompt.encode('utf-8')):
+            _, (logits, _) = model.step(mx.array(token), frozen=True)
+        while len(generated) < count:
+            token = int(model.sample(logits).item())
+            if token == 256:
+                break
+            reported = len(generated) // log_every
+            generated.extend(decode_token(model, token)[:count - len(generated)])
+            _, (logits, _) = model.step(mx.array(token), frozen=True)
+            if len(generated) // log_every > reported:
                 print(f'generated bytes: {len(generated)}/{count}', flush=True)
 
     with open(output, 'wb') as file:

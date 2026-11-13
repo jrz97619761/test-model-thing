@@ -55,7 +55,9 @@ def capture_tmt_v0_baseline(config, seed, steps, output_indices, state_rows):
         encoder_gradient = grads['encoder']['embed']['weight']
         mx.eval(encoder_gradient)
         gradients['encoder.embed.weight'] = _gradient_summary(encoder_gradient)
-        gradients['decoder.stop.bias'] = _array_values(grads['decoder']['stop']['bias'])
+        gradients['decoder.decode.bias'] = _gradient_summary(
+            grads['decoder']['decode']['bias']
+        )
         captured_gradients.append(gradients)
         original_update_gradients(grads)
         mx.eval(model.parameters(), model.optimizer.state)
@@ -121,9 +123,9 @@ def test_train_step(monkeypatch, model_factory):
 
     monkeypatch.setattr(model, 'sample', reject_sample)
     output, stop, loss = model.train_step(97, 98, False)
-    assert (output.shape, stop.shape) == ((256,), (1,))
+    assert (output.shape, stop.shape) == ((257,), (1,))
     assert mx.random.uniform(shape=(1,)).item() == expected
-    assert float(loss.item()) == 7.2099761962890625
+    assert float(loss.item()) == 6.899815082550049
     assert math.isfinite(float(loss.item()))
     assert int(model.optimizer.state['step'].item()) == 1
 
@@ -201,7 +203,7 @@ def loss_case(model_factory):
 
     model = model_factory()
     x = [0.0, 0.5, 1.0, 1.5]
-    output = mx.arange(256) * 0.001
+    output = mx.arange(257) * 0.001
     stop = mx.array([0.2])
     target = model.encoder(mx.array(67))
     mx.eval(output, stop, target)
@@ -215,12 +217,10 @@ def loss_case(model_factory):
     maximum = max(logits)
     logsumexp = maximum + math.log(sum(math.exp(value - maximum) for value in logits))
     cross_entropy = -logits[67] + logsumexp
-    stop_value = float(stop.item())
     terms = {
         'variance': variance_term,
         'latent_prediction': latent_term,
         'cross_entropy': cross_entropy,
-        'stop': (stop_value - 1.0) ** 2,
     }
     return model, mx.array(x), output, stop, terms
 
@@ -242,8 +242,7 @@ def test_loss(loss_case, target, end, ce_only):
     elif ce_only:
         expected = terms['cross_entropy']
     else:
-        expected = sum(terms.values()) - terms['stop']
-        expected += (float(stop.item()) - float(end)) ** 2
+        expected = sum(terms.values())
     components = {}
     actual = model.loss(x, output, stop, target, end, ce_only, components)
     assert float(actual) == pytest.approx(expected, rel=0, abs=1e-5)
@@ -252,7 +251,6 @@ def test_loss(loss_case, target, end, ce_only):
         'variance': 0.0 if ce_only else terms['variance'],
         'latent_prediction': terms['latent_prediction'] if scored else 0.0,
         'cross_entropy': terms['cross_entropy'] if target is not None else 0.0,
-        'stop': (0.2 - float(end)) ** 2 if scored else 0.0,
     }
     assert components.keys() == expected_components.keys()
     for name, value in expected_components.items():
@@ -294,7 +292,7 @@ def test_tmt_v0_gradients(monkeypatch):
     expected_decaytrace = (
         decay * previous_decaytrace + decay * (1.0 - decay) * previous_state
     )
-    expected_embedtrace = previous_embedtrace * decay + (mx.arange(256) == 66)[
+    expected_embedtrace = previous_embedtrace * decay + (mx.arange(257) == 66)[
         :, None
     ].astype(mx.float32)
     for field, expected_trace in (
@@ -316,7 +314,7 @@ def test_tmt_v0_gradients(monkeypatch):
         params['blocks'][0]['decay'] = (
             params['blocks'][0]['decay'] + direction * decay_shift
         )
-        row = (mx.arange(256) == 65)[:, None].astype(mx.float32)
+        row = (mx.arange(257) == 65)[:, None].astype(mx.float32)
         params['encoder']['embed']['weight'] = (
             params['encoder']['embed']['weight']
             + row * (direction * embed_shift)[None, :]
@@ -338,3 +336,22 @@ def test_tmt_v0_gradients(monkeypatch):
     analytic_embed = float(mx.sum(captured[1]['embed'][65] * direction).item())
     assert analytic_decay == pytest.approx(numerical_decay, rel=0, abs=0.002)
     assert analytic_embed == pytest.approx(numerical_embed, rel=0, abs=0.002)
+
+
+def test_stop_token_uses_the_shared_logits(model_factory):
+    import mlx.core as mx
+
+    model = model_factory()
+    logits, stop = model.decoder(mx.zeros((model.dim,)))
+    assert logits.shape == (257,)
+    assert float(stop.item()) == pytest.approx(float(mx.softmax(logits)[256].item()))
+    assert 'stop' not in model.decoder.parameters()
+
+    forced = mx.full((257,), -100.0)
+    forced[256] = 100.0
+    assert int(model.sample(forced).item()) == 256
+    x = mx.zeros((model.dim,))
+    expected = float((-forced[256] + mx.logsumexp(forced)).item())
+    for end in (False, True):
+        loss = model.loss(x, forced, stop, 256, end, ce_only=True)
+        assert float(loss.item()) == pytest.approx(expected)

@@ -10,6 +10,7 @@ if __name__ == '__main__':
 
     raise SystemExit(console_main(['benchmark', *sys.argv[1:]]))
 
+import itertools
 import math
 from collections.abc import Callable, Iterable
 from os import PathLike
@@ -21,6 +22,7 @@ import mlx.optimizers as opt
 
 from . import validation
 from .checkpoint import preserved_rng
+from .data import decode_token, encode_document
 from .model import Model
 from .records import write_json
 
@@ -80,8 +82,8 @@ def rollout(model: Model, sentence: bytes) -> mx.array | None:
     model.reset()
 
     x = None
-    for byte in sentence:
-        (x, _, _), _ = model.step(mx.array(byte), frozen=True)
+    for token in encode_document(model, sentence):
+        (x, _, _), _ = model.step(mx.array(token), frozen=True)
     if x is None:
         return None
 
@@ -108,6 +110,8 @@ def evaluate(
     documents, windows = tuple(documents), tuple(windows)
     if any(window <= 0 for window in windows):
         raise ValueError('evaluation windows must be positive')
+    if model.tokenizer is not None:
+        return _evaluate_bpe(model, documents, windows)
     input_bytes = sum(len(document) for document in documents)
     targets = validation.evaluation_targets(documents)
     common_start = max(windows) if windows else None
@@ -179,6 +183,98 @@ def evaluate(
         'common_targets': common_targets,
         'common_bpb': bits_per_byte(common_nll, common_targets)
         if common_targets
+        else None,
+        'windows': scores,
+    }
+
+
+def _evaluate_bpe(
+    model: Model, documents: tuple[bytes, ...], windows: tuple[int, ...]
+) -> dict[str, Any]:
+    """Score next tokens per target byte; windows re-encode their byte suffix."""
+    encoded = []
+    for document in documents:
+        tokens = encode_document(model, document)
+        sizes = [len(decode_token(model, token)) for token in tokens]
+        encoded.append((document, tokens, [0, *itertools.accumulate(sizes)]))
+    targets = sum(max(0, len(tokens) - 1) for _, tokens, _ in encoded)
+    if not targets:
+        raise ValueError('evaluation requires at least one target token pair')
+    common_start = max(windows) if windows else None
+    snapshot = model.snapshot_state()
+    full_nll = common_nll = 0.0
+    scored_bytes = common_targets = common_bytes = 0
+
+    def evaluation_step(current):
+        (_, _, _), (logits, _) = model.step(mx.array(current), frozen=True)
+        return logits
+
+    def negative_log_likelihood(logits, target):
+        return float((mx.logsumexp(logits) - logits[target]).item())
+
+    def bits_per_byte(nll_sum, target_count):
+        return nll_sum / (math.log(2.0) * target_count)
+
+    try:
+        for _, tokens, offsets in encoded:
+            model.reset()
+            for index, current in enumerate(tokens):
+                logits = evaluation_step(current)
+                target = index + 1
+                if target < len(tokens):
+                    loss = negative_log_likelihood(logits, tokens[target])
+                    size = offsets[target + 1] - offsets[target]
+                    full_nll += loss
+                    scored_bytes += size
+                    if common_start is not None and offsets[target] >= common_start:
+                        common_nll += loss
+                        common_targets += 1
+                        common_bytes += size
+            model.eval_state()
+
+        scores = []
+        for window in windows:
+            window_nll = window_common_nll = 0.0
+            for document, tokens, offsets in encoded:
+                for target in range(1, len(tokens)):
+                    model.reset()
+                    end = offsets[target]
+                    context = document[max(0, end - window):end]
+                    logits = None
+                    for current in encode_document(model, context):
+                        logits = evaluation_step(current)
+                    loss = negative_log_likelihood(logits, tokens[target])
+                    window_nll += loss
+                    if common_start is not None and end >= common_start:
+                        window_common_nll += loss
+            common_bpb = (
+                bits_per_byte(window_common_nll, common_bytes)
+                if common_bytes
+                else None
+            )
+            scores.append(
+                {
+                    'window': window,
+                    'bpb': bits_per_byte(window_nll, scored_bytes),
+                    'common_bpb': common_bpb,
+                    'delta_bpb': common_bpb - bits_per_byte(common_nll, common_bytes)
+                    if common_bytes
+                    else None,
+                }
+            )
+    finally:
+        model.restore_state(snapshot)
+        model.eval_state()
+
+    return {
+        'input_bytes': sum(len(document) for document in documents),
+        'targets': targets,
+        'scored_bytes': scored_bytes,
+        'bpb': bits_per_byte(full_nll, scored_bytes),
+        'common_targets': common_targets,
+        'common_scored_bytes': common_bytes,
+        'common_bpb': bits_per_byte(common_nll, common_bytes)
+        if common_bytes
         else None,
         'windows': scores,
     }

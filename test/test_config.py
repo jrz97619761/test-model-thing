@@ -75,7 +75,7 @@ EXTENSION_CASES = {  # id: (default, invalid value, message)
     'nan-json-value': (0.5, NAN, 'finite JSON values'),
 }
 FILE_FAULTS = {  # id: message fragments
-    'missing-tensor': ('m.decoder.stop.bias',),
+    'missing-tensor': ('m.decoder.decode.bias',),
     'extra-tensor': ('o.extra',),
     'wrong-shape': ('decoder.decode.weight', 'shape'),
     'wrong-dtype': ('decoder.decode.weight.m', 'dtype'),
@@ -145,8 +145,10 @@ def test_load_config(tmp_path, monkeypatch):
     )
     assert all(
         parameter.default is inspect.Parameter.empty
-        for parameter in parameters.values()
+        for name, parameter in parameters.items()
+        if name != 'tokenizer'
     ), 'direct Model constructor fields must remain required'
+    assert parameters['tokenizer'].default is None
     with pytest.raises(TypeError, match='required positional arguments'):
         Model(dim=4, layers=1, spread=4, block='tmt-v0')
     with pytest.raises(ValueError, match='unknown block'):
@@ -268,6 +270,8 @@ def test_load_config_rejects_bad_files(tmp_path, contents, error, message):
         ('{"model": {}, "other": 1}',
          "model config has unknown field 'other'"),
         ('{"model": []}', 'model config.model must be an object'),
+        ('{"model": {"tokenizer": {"merges": []}}}',
+         "model config.model has unknown field 'tokenizer'"),
     ],
     ids=[
         'unknown-dimension',
@@ -275,6 +279,7 @@ def test_load_config_rejects_bad_files(tmp_path, contents, error, message):
         'flat-field-in-grouped-config',
         'unknown-group',
         'bad-group-type',
+        'tokenizer-needs-bpe-option',
     ],
 )
 def test_load_config_rejects_invalid_grouped_files(tmp_path, contents, message):
@@ -443,7 +448,7 @@ def test_checkpoint_rejects_invalid_files(checkpoint, fault, parts):
         case 'missing-tensor':
             del arrays[parts[0]]
         case 'extra-tensor':
-            arrays[parts[0]] = arrays['m.decoder.stop.bias']
+            arrays[parts[0]] = arrays['m.decoder.decode.bias']
         case 'wrong-shape':
             name = 'm.' + parts[0]
             arrays[name] = mx.zeros((1,), dtype=arrays[name].dtype)
@@ -585,7 +590,7 @@ def test_checkpoint_load_preserves_rng(monkeypatch, checkpoint, failure):
             monkeypatch.setattr(mx, 'load', fail)
         case 'validation':
             arrays = dict(checkpoint.arrays)
-            arrays.pop('m.decoder.stop.bias')
+            arrays.pop('m.decoder.decode.bias')
             mx.save_safetensors(checkpoint.path, arrays, metadata=checkpoint.metadata)
 
     random.seed(817)
