@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 TOPICS = (
-    'init', 'train', 'sweep', 'evaluate', 'benchmark', 'generate', 'inspect', 'help'
+    'init', 'tokenizer-convert', 'train', 'sweep', 'evaluate', 'benchmark',
+    'generate', 'inspect', 'help',
 )
 BASE_ARGV = {
     'train': 'train --data train.bin --run invalid --seed 11',
@@ -931,3 +932,22 @@ def test_installed_workflow(tmp_path, manifest_fields, cli, jsonl):
     assert 'not empty' in cli(*sweep, code=1).stderr
     after = {p: p.read_bytes() for p in (root / 'sw').rglob('*') if p.is_file()}
     assert after == before
+
+
+
+def test_tokenizer_convert_without_mlx(tmp_path, model_free_cli):
+    import base64
+
+    rows = [(bytes([i]), i) for i in range(256)] + [(b'ab', 256)]
+    source = tmp_path / 'ranks.tiktoken'
+    source.write_text(''.join(
+        f'{base64.b64encode(token).decode()} {rank}\n' for token, rank in rows
+    ))
+    tokenizer = tmp_path / 'tokenizer.json'
+    args = ('--format', 'tiktoken', '--input', str(source), '--output', str(tokenizer))
+    result = model_free_cli('tokenizer-convert', *args)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(tokenizer.read_text()) == {'merges': [[97, 98]]}
+    result = model_free_cli('tokenizer-convert', *args)
+    assert result.returncode == 1
+    assert 'exists' in result.stderr

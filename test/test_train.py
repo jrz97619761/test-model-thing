@@ -26,6 +26,7 @@ INVALID_GRIDS = {
         'empty-seed-axis': {'dim': [4], 'seed': []}
     },
     'model config.dim must be a positive integer': {'zero-dimension': {'dim': [4, 0]}},
+    'sweep grid cannot set tokenizer': {'tokenizer-axis': {'tokenizer': [None]}},
     'sweep grid seed must be an integer': {
         'boolean-seed': {'seed': [11, True]},
         'string-seed': {'seed': [11, '22']},
@@ -66,8 +67,8 @@ def test_train_visits_byte_pairs_and_resumes(
     )
     monkeypatch.setattr(Model, 'train_step', record_train)
     monkeypatch.setattr(Model, 'step', record_step)
-    first = train(tiny_settings, one, str(data), 3, 11)
-    second = train(tiny_settings, two, str(data), 3, 11)
+    first = train(tiny_settings, one, str(data), 4, 11)
+    second = train(tiny_settings, two, str(data), 4, 11)
     resumed = train(None, one, str(data), 2, 11, resume=True)
 
     stdout = capsys.readouterr().out
@@ -75,11 +76,11 @@ def test_train_visits_byte_pairs_and_resumes(
         assert stdout.count(message) == 3, f'expected three occurrences of {message!r}'
     assert 'seed: 11, config:' in stdout
     assert '\r' not in stdout
-    expected = [(0, 255, False), (255, 65, False), (65, 10, True)]
+    expected = [(0, 255, False), (255, 65, False), (65, 10, False), (10, 256, True)]
     assert calls == expected + expected + expected[:2]
-    assert frozen_steps == [10, 10]
+    assert frozen_steps == []
     steps = [int(m.optimizer.state['step'].item()) for m in (first, second, resumed)]
-    assert steps == [3, 3, 5], 'training and resume optimizer steps differ'
+    assert steps == [4, 4, 6], 'training and resume optimizer steps differ'
     assert snapshot(first) == snapshot(second)
 
 
@@ -180,7 +181,7 @@ def test_resume_file_order_uses_seed(tiny_settings, tmp_path):
 
 @pytest.mark.parametrize('resume', [False, True], ids=['fresh', 'resume'])
 @pytest.mark.parametrize(
-    'stage', ['update', 'terminal', 'sample', 'evaluation', 'save']
+    'stage', ['update', 'sample', 'evaluation', 'save']
 )
 def test_sigint_saves_complete_update(
     monkeypatch, tiny_settings, tmp_path, snapshot, jsonl, resume, stage
@@ -202,7 +203,6 @@ def test_sigint_saves_complete_update(
     expected = train(settings, reference, str(data), 1, 11, resume=resume)
     targets = {
         'update': (Model, 'update_gradients'),
-        'terminal': (TrainingRun, 'consume_terminal_byte'),
         'sample': (TrainingRun, 'report_sample'),
         'evaluation': (TrainingRun, 'report_evaluation'),
         'save': (mx, 'save_safetensors'),
@@ -263,7 +263,8 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
     (tmp_path / 'data').mkdir()
     for name, content in (('a.bin', b'ab'), ('b.bin', b'cd'), ('c.bin', b'ef')):
         (tmp_path / 'data' / name).write_bytes(content)
-        paths[content[0]] = str((tmp_path / 'data' / name).resolve())
+        for byte in content:
+            paths[byte] = str((tmp_path / 'data' / name).resolve())
 
     def capture(record, *args, **kwargs):
         records.append(deepcopy(record))
@@ -299,7 +300,7 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
         'optimizer': {'rate': settings['rate'], 'bound': settings['bound']},
         'sampling': {'temp': settings['temp']},
     }
-    files = [path for path, _ in calls[:3]]
+    files = records[0]['data']['train']['files']
     for record in records:
         assert record['model'] == {
             **expected_model,
@@ -331,7 +332,7 @@ def test_manifest(monkeypatch, tiny_settings, tmp_path, manifest_fields):
             'started_at', 'status', 'last_checkpoint', 'error'
         }
         assert record['run']['error'] is None
-    assert calls == [(path, False) for path in files + files[:1]]
+    assert calls == [(path, False) for path in files[:2] for _ in range(2)]
     progress = ('completed_updates', 'optimizer_step')
     saved = {
         'completed_updates': 4,
@@ -449,7 +450,6 @@ def test_short_documents_fail_the_run(tiny_settings, tmp_path):
 
     (tmp_path / 'data').mkdir()
     (tmp_path / 'data' / 'empty.bin').write_bytes(b'')
-    (tmp_path / 'data' / 'one.bin').write_bytes(b'x')
     checkpoint = tmp_path / 'run' / 'model.safetensors'
     with pytest.raises(ValueError, match='no training targets found in data pass'):
         train(tiny_settings, checkpoint, str(tmp_path / 'data/*.bin'), 1, 11)
@@ -494,11 +494,6 @@ def test_post_update_action_order(monkeypatch, tmp_path):
     run.completed = 500
     events = []
     monkeypatch.setattr(run, 'report_loss', lambda: events.append('loss'))
-    monkeypatch.setattr(
-        run,
-        'consume_terminal_byte',
-        lambda byte: events.append(('terminal-byte', byte)),
-    )
     monkeypatch.setattr(run, 'report_sample', lambda: events.append('sample'))
     monkeypatch.setattr(
         run, 'report_evaluation', lambda: events.append('evaluation')
@@ -507,11 +502,10 @@ def test_post_update_action_order(monkeypatch, tmp_path):
         run, 'save_checkpoint', lambda: events.append('checkpoint')
     )
 
-    run.after_update(True, 255)
+    run.after_update()
 
     assert events == [
         'loss',
-        ('terminal-byte', 255),
         'sample',
         'evaluation',
         'checkpoint',
@@ -575,7 +569,7 @@ def test_loss_rows(
         window, count = slice(previous, end), end - previous
         mean = math.fsum(losses[window]) / count
         assert row['mean_loss'] == pytest.approx(mean, rel=0, abs=5e-8)
-        names = {'variance', 'latent_prediction', 'cross_entropy', 'stop'}
+        names = {'variance', 'latent_prediction', 'cross_entropy'}
         assert set(row['mean_loss_components']) == names
         for name, value in row['mean_loss_components'].items():
             if not ce_only:
@@ -1007,6 +1001,7 @@ def test_sweep_runs_grid(
         assert len(Path(samples[0]['path']).read_bytes()) == 3
         model, settings = load_checkpoint(checkpoint)
         expected_settings = {
+            'tokenizer': None,
             'block': row['model']['block'],
             **row['model']['dimensions'],
             **row['hparams']['optimizer'],
@@ -1016,3 +1011,22 @@ def test_sweep_runs_grid(
         assert model.count() == row['model']['trainable_parameters']
         assert model.temporal_gradient == row['model']['temporal_gradient']
         assert int(model.optimizer.state['step'].item()) == 2
+
+
+def test_single_token_document_trains_stop_target(tiny_settings, tmp_path, monkeypatch):
+    from tmt.model import Model
+    from tmt.runtime import train
+
+    source = tmp_path / 'single.bin'
+    source.write_bytes(b'x')
+    seen = []
+    original = Model.train_step
+
+    def capture(self, current, target, end, *args, **kwargs):
+        seen.append((current, target, end))
+        return original(self, current, target, end, *args, **kwargs)
+
+    monkeypatch.setattr(Model, 'train_step', capture)
+    model = train(tiny_settings, tmp_path / 'run/model.safetensors', str(source), 1, 11)
+    assert seen == [(ord('x'), 256, True)]
+    assert int(model.optimizer.state['step'].item()) == 1

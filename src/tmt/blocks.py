@@ -46,6 +46,9 @@ class Block(nn.Module):
         self._runtime_schema = validation.block_runtime_schema(self, trainable)
         return self._runtime_schema
 
+    def configure_vocabulary(self, vocab_size: int) -> None:
+        """Size token-indexed runtime arrays before schema validation."""
+
     def check_runtime_values(
         self, values: dict[str, mx.array], fields: tuple[str, ...]
     ) -> None:
@@ -116,6 +119,9 @@ class Block(nn.Module):
 
 
 class TMTv0Block(Block):
+    def configure_vocabulary(self, vocab_size: int) -> None:
+        self.embedtrace = mx.zeros((vocab_size, self.embedtrace.shape[1]))
+
     @property
     def state_fields(self) -> tuple[str, ...]:
         return ('states',)
@@ -164,7 +170,7 @@ class TMTv0Block(Block):
         grads: GradientTree,
     ) -> tuple[GradientTree, mx.array | None, dict[str, mx.array]]:
         decay = aux
-        c_range = (mx.arange(256) == byte)[:, None].astype(mx.float32)
+        c_range = (mx.arange(len(self.embedtrace)) == byte)[:, None].astype(mx.float32)
         decay_embedtrace = self.embedtrace * decay
         embedtrace = decay_embedtrace + c_range
         decaytrace = (decay * self.decaytrace) + (decay * (1.0 - decay) * self.states)

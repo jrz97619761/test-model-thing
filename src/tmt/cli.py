@@ -15,7 +15,8 @@ from typing import Any, Protocol, Sequence
 
 from . import validation
 from .config import group_model_config, load_config
-from .records import build_run_manifest, write_json
+from .data import BPETokenizer, huggingface_merges, tiktoken_merges
+from .records import build_run_manifest, read_json, write_json
 from .runtime import evaluate_checkpoint, generate, inspect_checkpoint, sweep, train
 
 
@@ -52,6 +53,19 @@ INIT_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     ),
 )
 
+TOKENIZER_CONVERT_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (
+        ('--format',),
+        {
+            'required': True,
+            'choices': ('huggingface', 'tiktoken'),
+            'help': 'source tokenizer format',
+        },
+    ),
+    (('--input',), {'required': True, 'help': 'source tokenizer file'}),
+    (('--output',), {'required': True, 'help': 'new TMT tokenizer JSON file'}),
+)
+
 SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     (
         ('--data',),
@@ -65,7 +79,7 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 1000,
-            'help': 'target-byte optimizer updates per run; default: 1000',
+            'help': 'target-token optimizer updates per run; default: 1000',
         },
     ),
     (
@@ -96,7 +110,7 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         ('--ce-only',),
         {
             'action': 'store_true',
-            'help': 'next-byte cross entropy only; default: full TMT objective',
+            'help': 'next-token cross entropy only; default: full TMT objective',
         },
     ),
     (
@@ -119,7 +133,7 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 256,
-            'help': 'positive sample byte count; default: 256',
+            'help': 'maximum sample byte count; default: 256',
         },
     ),
     (
@@ -144,6 +158,7 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
 )
 
 TRAIN_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (('--bpe',), {'help': 'BPE tokenizer JSON for a fresh run; default: byte mode'}),
     (
         ('checkpoint',),
         {
@@ -254,7 +269,7 @@ GENERATE_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 512,
-            'help': 'number of output bytes; default: 512',
+            'help': 'maximum output bytes; default: 512',
         },
     ),
     (
@@ -461,7 +476,12 @@ def _run_init(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
 
 def _run_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     _validate_training_args(args)
+    if args.resume and args.bpe is not None:
+        parser.error('--bpe cannot be used with --resume')
     settings, checkpoint, new_run = _resolve_train_path(args, parser)
+    if args.bpe is not None:
+        settings['tokenizer'] = read_json(args.bpe)
+        BPETokenizer.from_dict(settings['tokenizer'])
     train(
         settings,
         checkpoint,
@@ -567,6 +587,18 @@ def _run_help(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
     print(command_manual(), end='')
 
 
+def _run_tokenizer_convert(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    if args.format == 'huggingface':
+        merges = huggingface_merges(read_json(args.input))
+    else:
+        merges = tiktoken_merges(Path(args.input).read_text(encoding='utf-8'))
+    tokenizer = BPETokenizer(merges)
+    write_json(args.output, {'merges': merges}, exclusive=True)
+    print(f'wrote tokenizer: {args.output}, vocabulary: {tokenizer.vocab_size}')
+
+
 type CommandHandler = Callable[[argparse.Namespace, argparse.ArgumentParser], None]
 
 
@@ -583,6 +615,12 @@ class CommandSpec:
 COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec('init', 'write default model settings', _run_init, INIT_ARGUMENTS),
     CommandSpec(
+        'tokenizer-convert',
+        'convert external byte BPE merges',
+        _run_tokenizer_convert,
+        TOKENIZER_CONVERT_ARGUMENTS,
+    ),
+    CommandSpec(
         'train',
         'train a model on byte files',
         _run_train,
@@ -591,7 +629,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
         exclusive=TRAIN_SETTINGS_ARGUMENTS,
     ),
     CommandSpec(
-        'evaluate', 'score next-byte predictions', _run_evaluate, EVALUATE_ARGUMENTS
+        'evaluate', 'score next-token predictions', _run_evaluate, EVALUATE_ARGUMENTS
     ),
     CommandSpec(
         'benchmark',
@@ -601,7 +639,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         'generate',
-        'generate a fixed number of bytes',
+        'generate bytes until stop or byte limit',
         _run_generate,
         GENERATE_ARGUMENTS,
     ),

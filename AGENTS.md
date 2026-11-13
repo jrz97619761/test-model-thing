@@ -15,7 +15,7 @@ All package paths below are relative to `src/tmt/`.
 | `config.py` | `MODEL_DEFAULTS` and grouped partial JSON configuration through `load_config()` |
 | `validation.py` | Input checks, checkpoint metadata and tensor checks, and block contracts |
 | `checkpoint.py` | Seeded model creation and Safetensors save/load |
-| `data.py` | `DataOptions`, `ByteFiles`, file selection, readability checks, and raw-byte document reads |
+| `data.py` | `DataOptions`, `ByteFiles`, file selection, readability checks, raw-byte document reads, and byte BPE encoding and conversion |
 | `runtime.py` | `TrainingRun`, `TrainingOptions`, `MonitorOptions`, train loops, samples, checkpoint evaluation and inspection, generation, and sweeps |
 | `records.py` | Typed manifest records, JSON output, and JSONL output |
 | `benchmark.py` | Frozen byte evaluation, fixed byte fixtures, and optional CoLA classification |
@@ -81,6 +81,8 @@ The tests are in `test/`:
 | `test_cli.py` | Help, errors, byte files, generation, evaluation, interrupts, and installed commands |
 | `test_records.py` | Grouped run and sweep manifest records |
 | `test_train.py` | Train updates, resume, manifests, samples, evaluation intervals, and sweeps |
+| `test_tokenizer.py` | Byte BPE merges, tokenizer JSON checks, and converters |
+| `test_bpe.py` | BPE gradients, checkpoints, command workflows, byte scores, and stop and byte limits |
 
 `test/conftest.py` supplies shared fixtures.
 Use `run_subprocess` for child Python scripts, module commands, and installed-command checks.
@@ -91,8 +93,10 @@ Do not regenerate the baseline only to hide a regression. Review any intentional
 
 ## Model and evaluation contracts
 
-- Preserve raw-byte documents and output. The encoder has 256 byte embeddings, and the decoder returns 256 byte logits.
-- Keep defaults in `MODEL_DEFAULTS`. Direct `Model` construction requires all constructor arguments.
+- Preserve raw-byte documents and output. Byte mode uses 257 embeddings and logits, with stop at ID 256. BPE mode uses one embedding and logit per vocabulary token.
+- The TMT-v0 embedding trace follows the vocabulary size. Preserve the recurrent equations. The stop-token vocabulary intentionally changes the earlier byte-mode numerical baseline.
+- BPE turns on only with `train --bpe`. It uses external merge rules, with merge IDs at 257 and above. There is no BOS token. Generation stops at ID 256.
+- Keep defaults in `MODEL_DEFAULTS`. Direct `Model` construction requires the original seven settings. The optional `tokenizer` defaults to byte mode.
 - Model config JSON uses `model` and `hparams` groups. `load_config()` accepts grouped partial input only. An empty object uses all defaults. It returns flat settings for `Model` and checkpoint metadata.
 - Keep `DataOptions` in `data.py`. `TrainingOptions` and `MonitorOptions` group internal train inputs. Keep the public `train()` and `sweep()` arguments stable.
 - Preserve config validation, examples, and checkpoint metadata when model fields change.
@@ -110,7 +114,7 @@ The Python result uses `byte_scores` and `epoch_scores`, plus `feature_source` w
 The `--output` file adds `checkpoint`, `optimizer_step`, and `seed` after the result fields. The `evaluate` result ends with `checkpoint` and `optimizer_step`.
 The CoLA MCC values use a scale of 100.
 
-Keep objective loss, frozen bits per byte, and CoLA MCC distinct in reports.
+Keep objective loss, frozen bits per byte, and CoLA MCC distinct in reports. BPE BPB divides by the bytes of the target tokens. BPE context windows encode their exact byte suffix again.
 Record configuration, seeds, data selection, and budgets for experiments.
 Identify any fixture change that prevents direct score comparisons.
 
@@ -118,7 +122,7 @@ Identify any fixture change that prevents direct score comparisons.
 
 `checkpoint.py` saves model parameters, block runtime arrays, and optimizer tensors.
 The Safetensors metadata contains a `tmt` JSON string with `version: 1` and the flat resolved model configuration.
-The loader requires the current metadata fields and exact tensor names, shapes, and dtypes.
+The loader requires the current metadata fields and exact tensor names, shapes, and dtypes. BPE metadata contains the full tokenizer specification.
 Grouped config input resolves to flat settings before model construction and checkpoint save.
 
 - Preserve strict checkpoint validation and flat checkpoint metadata. Do not add fallback support for flat model configs or run manifests.
@@ -141,10 +145,10 @@ Sweep result rows group model settings, hyperparameters, data selections, traini
 Loss, sample, and interval-evaluation JSONL rows keep their flat field names.
 
 The CLI refuses a fresh run at an existing explicit checkpoint path.
-The trainer resets recurrent state and traces for each nonempty document.
+The trainer resets recurrent state and traces for each nonempty document. Each final document token predicts stop ID 256, including one-token documents.
 File order uses a separate seeded Python RNG.
 
-`TrainingRun.after_update()` controls loss reports, terminal-byte consumption, samples, evaluation, and periodic saves at each `save_every` interval.
+`TrainingRun.after_update()` controls loss reports, samples, evaluation, and periodic saves at each `save_every` interval.
 The trainer also saves at normal completion. It rewrites `run.json` after each save, and records `error` when an exception fails the run.
 On the main thread, its SIGINT and SIGTERM handler records an interrupt request.
 The trainer checks the request at complete update boundaries, after the update actions.

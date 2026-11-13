@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as opt
@@ -9,25 +11,26 @@ from mlx.utils import tree_flatten
 
 from . import validation
 from .blocks import BLOCKS, Block
+from .data import BPETokenizer
 
 
 class Encoder(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, vocab_size: int):
         super().__init__()
-        self.embed = nn.Embedding(256, dim)
+        self.embed = nn.Embedding(vocab_size, dim)
 
     def __call__(self, x: mx.array):
         return self.embed(x)
 
 
 class Decoder(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, vocab_size: int):
         super().__init__()
-        self.decode = nn.Linear(dim, 256)
-        self.stop = nn.Linear(dim, 1)
+        self.decode = nn.Linear(dim, vocab_size)
 
     def __call__(self, x: mx.array):
-        return self.decode(x), mx.sigmoid(self.stop(x))
+        logits = self.decode(x)
+        return logits, mx.softmax(logits)[256:257]
 
 
 class Model(nn.Module):
@@ -40,20 +43,26 @@ class Model(nn.Module):
         rate: float,
         bound: tuple[int, int],
         block: str,
+        tokenizer: dict[str, Any] | None = None,
     ):
         super().__init__()
         validation.block_name(block)
         self.dim = dim
         self.temp = temp
+        self.tokenizer = (
+            None if tokenizer is None else BPETokenizer.from_dict(tokenizer)
+        )
+        self.vocab_size = 257 if self.tokenizer is None else self.tokenizer.vocab_size
 
-        self.encoder = Encoder(dim)
-        self.decoder = Decoder(dim)
+        self.encoder = Encoder(dim, self.vocab_size)
+        self.decoder = Decoder(dim, self.vocab_size)
 
         self.blocks = [BLOCKS[block](dim, spread) for _ in range(layers)]
         for item in self.blocks:
             validation.require(
                 isinstance(item, Block), 'block factories must return a Block module'
             )
+            item.configure_vocabulary(self.vocab_size)
             item.validate()
 
         def learning_rate(step: mx.array):
@@ -70,7 +79,9 @@ class Model(nn.Module):
 
     def sample(self, output: mx.array, key: mx.array | None = None):
         probs = mx.softmax(output)
-        entropy = -mx.sum(probs * mx.log(probs + 1e-8)) / mx.log(mx.array(256.0))
+        entropy = -mx.sum(probs * mx.log(probs + 1e-8)) / mx.log(
+            mx.array(float(self.vocab_size))
+        )
 
         temp = mx.maximum(0.1, self.temp * (1.0 - self.temp * entropy)).item()
         return mx.random.categorical(output / temp, key=key)
@@ -128,7 +139,7 @@ class Model(nn.Module):
     ) -> mx.array:
         terms = {
             name: mx.array(0.0)
-            for name in ('variance', 'latent_prediction', 'cross_entropy', 'stop')
+            for name in ('variance', 'latent_prediction', 'cross_entropy')
         }
         if not ce_only:
             loss = mx.maximum(0.0, 1.0 - mx.sqrt(mx.var(x) + 1e-4))
@@ -139,13 +150,9 @@ class Model(nn.Module):
 
                 terms['latent_prediction'] = mx.mean(mx.square(x - target_embedding))
                 terms['cross_entropy'] = -output[n] + mx.logsumexp(output)
-                terms['stop'] = mx.mean(
-                    mx.square(stop - mx.array([1.0 if end else 0.0]))
-                )
                 loss = loss + terms['latent_prediction']
                 # Keep this order: seeded tests pin the float32 loss bits.
                 loss = loss - output[n] + mx.logsumexp(output)
-                loss = loss + terms['stop']
         else:
             if target is not None:
                 loss = -output[mx.array(target)] + mx.logsumexp(output)
