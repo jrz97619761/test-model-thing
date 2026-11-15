@@ -49,20 +49,23 @@ class Model(nn.Module):
         validation.block_name(block)
         self.dim = dim
         self.temp = temp
+        # Byte mode is BPE without merges, so every model has a tokenizer.
         self.tokenizer = (
-            None if tokenizer is None else BPETokenizer.from_dict(tokenizer)
+            BPETokenizer(()) if tokenizer is None else BPETokenizer.from_dict(tokenizer)
         )
-        self.vocab_size = 257 if self.tokenizer is None else self.tokenizer.vocab_size
+        self.vocab_size = self.tokenizer.vocab_size
 
         self.encoder = Encoder(dim, self.vocab_size)
         self.decoder = Decoder(dim, self.vocab_size)
 
-        self.blocks = [BLOCKS[block](dim, spread) for _ in range(layers)]
+        self.blocks = [
+            BLOCKS[block](dim, spread, self.vocab_size)
+            for _ in range(layers)
+        ]
         for item in self.blocks:
             validation.require(
                 isinstance(item, Block), 'block factories must return a Block module'
             )
-            item.configure_vocabulary(self.vocab_size)
             item.validate()
 
         def learning_rate(step: mx.array):

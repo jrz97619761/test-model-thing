@@ -1,4 +1,4 @@
-"""Byte-step block contract, the TMT-v0 block, and the block registry."""
+"""Token-step block contract, the TMT-v0 block, and the block registry."""
 
 from __future__ import annotations
 
@@ -19,7 +19,11 @@ type RuntimeSchema = tuple[tuple[str, tuple[int, ...], mx.Dtype], ...]
 
 
 class Block(nn.Module):
-    """Byte-step block with fixed, frozen runtime arrays."""
+    """Token-step block with fixed, frozen runtime arrays.
+
+    Block factories take `(dim, spread, vocab_size)`. Size token-indexed runtime
+    arrays from `vocab_size` in the constructor, before `validate()` runs.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -45,9 +49,6 @@ class Block(nn.Module):
         trainable = dict(tree_flatten(self.trainable_parameters()))
         self._runtime_schema = validation.block_runtime_schema(self, trainable)
         return self._runtime_schema
-
-    def configure_vocabulary(self, vocab_size: int) -> None:
-        """Size token-indexed runtime arrays before schema validation."""
 
     def check_runtime_values(
         self, values: dict[str, mx.array], fields: tuple[str, ...]
@@ -119,9 +120,6 @@ class Block(nn.Module):
 
 
 class TMTv0Block(Block):
-    def configure_vocabulary(self, vocab_size: int) -> None:
-        self.embedtrace = mx.zeros((vocab_size, self.embedtrace.shape[1]))
-
     @property
     def state_fields(self) -> tuple[str, ...]:
         return ('states',)
@@ -138,14 +136,14 @@ class TMTv0Block(Block):
     def feature_source(self) -> FeatureSource:
         return 'recurrent-state'
 
-    def __init__(self, dim: int, spread: int) -> None:
+    def __init__(self, dim: int, spread: int, vocab_size: int) -> None:
         super().__init__()
         halflives = mx.exp(mx.linspace(0.0, math.log(float(spread)), dim))
         retention = mx.exp(-math.log(2.0) / halflives)
         self.decay = mx.log(retention) - mx.log1p(-retention)
         self.states = mx.zeros((dim,))
         self.decaytrace = mx.zeros((dim,))
-        self.embedtrace = mx.zeros((256, dim))
+        self.embedtrace = mx.zeros((vocab_size, dim))
         self.norm = nn.LayerNorm(dim)
         self.weights = nn.Linear(dim, dim, bias=False)
         self.silu = nn.SiLU()

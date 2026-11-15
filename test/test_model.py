@@ -9,90 +9,7 @@ import pytest
 FIXTURE = Path(__file__).parent / 'fixtures' / 'tmt-v0-baseline.json'
 
 
-def _array_values(array):
-    import mlx.core as mx
-
-    mx.eval(array)
-    return [float(value) for value in array.tolist()]
-
-
-def _flatten_values(value):
-    if isinstance(value, list):
-        for item in value:
-            yield from _flatten_values(item)
-    else:
-        yield float(value)
-
-
-def _gradient_summary(array):
-    values = list(_flatten_values(array.tolist()))
-    return {
-        'sum': sum(values),
-        'sum_squares': sum(value * value for value in values),
-        'max_abs': max((abs(value) for value in values), default=0.0),
-    }
-
-
-def capture_tmt_v0_baseline(config, seed, steps, output_indices, state_rows):
-    import mlx.core as mx
-
-    from tmt.model import Model
-
-    random.seed(seed)
-    mx.random.seed(seed)
-    model = Model(**config)
-    mx.eval(model.parameters())
-
-    updates = []
-    captured_gradients = []
-    original_update_gradients = model.update_gradients
-
-    def capture_update_gradients(grads):
-        gradients = {
-            f'blocks.{index}.decay': _array_values(block_grads['decay'])
-            for index, block_grads in enumerate(grads['blocks'])
-        }
-        encoder_gradient = grads['encoder']['embed']['weight']
-        mx.eval(encoder_gradient)
-        gradients['encoder.embed.weight'] = _gradient_summary(encoder_gradient)
-        gradients['decoder.decode.bias'] = _gradient_summary(
-            grads['decoder']['decode']['bias']
-        )
-        captured_gradients.append(gradients)
-        original_update_gradients(grads)
-        mx.eval(model.parameters(), model.optimizer.state)
-
-    model.update_gradients = capture_update_gradients
-
-    for step in steps:
-        record = {'input': step['input'], 'target': step['target'], 'end': step['end']}
-        updates.append(record)
-        metrics = {}
-        output, stop, loss = model.train_step(
-            step['input'], step['target'], step['end'], metrics=metrics
-        )
-        mx.eval(output, stop, loss, *metrics.values())
-        record['logits'] = {
-            str(index): float(output[index].item()) for index in output_indices
-        }
-        record['prediction'] = int(mx.argmax(output).item())
-        record['stop'] = float(stop.item())
-        record['loss'] = float(loss.item())
-        record['components'] = {name: metrics[name] for name in sorted(metrics)}
-        record['gradients'] = captured_gradients.pop()
-        record['state'] = {
-            f'blocks.{index}': {
-                'states': _array_values(layer.states),
-                'decaytrace': _array_values(layer.decaytrace),
-                'embedtrace_rows': {
-                    str(byte): _array_values(layer.embedtrace[byte])
-                    for byte in state_rows
-                },
-            }
-            for index, layer in enumerate(model.blocks)
-        }
-
-    return updates
+# Import behavior
 
 
 def test_import_has_no_actions(run_subprocess):
@@ -109,73 +26,7 @@ import tmt.model
     assert result.returncode == 0, result.stderr
 
 
-def test_train_step(monkeypatch, model_factory):
-    import mlx.core as mx
-
-    model = model_factory()
-    mx.eval(model.parameters())
-    mx.random.seed(23)
-    expected = mx.random.uniform(shape=(1,)).item()
-    mx.random.seed(23)
-
-    def reject_sample(*args, **kwargs):
-        pytest.fail('train_step sampled')
-
-    monkeypatch.setattr(model, 'sample', reject_sample)
-    output, stop, loss = model.train_step(97, 98, False)
-    assert (output.shape, stop.shape) == ((257,), (1,))
-    assert mx.random.uniform(shape=(1,)).item() == expected
-    assert float(loss.item()) == 6.899815082550049
-    assert math.isfinite(float(loss.item()))
-    assert int(model.optimizer.state['step'].item()) == 1
-
-    mx.random.seed(29)
-    expected = mx.random.uniform(shape=(1,)).item()
-    mx.random.seed(29)
-    output, stop, loss = model.train_step(98, 99, True)
-    assert mx.random.uniform(shape=(1,)).item() == expected
-    assert math.isfinite(float(loss.item()))
-    assert int(model.optimizer.state['step'].item()) == 2
-
-
-def test_tmt_v0_baseline():
-    """Compare seeded TMT-v0 updates with the saved fixture.
-
-    After an intentional TMT-v0 change, rewrite the fixture and review it:
-        TMT_RECORD_TMT_V0_BASELINE=1 python -m pytest test/test_model.py -k baseline
-        git diff test/fixtures/tmt-v0-baseline.json
-    """
-    fixture = json.loads(FIXTURE.read_text())
-    keys = ('config', 'seed', 'steps', 'output_indices', 'state_rows')
-    actual_updates = capture_tmt_v0_baseline(*(fixture[key] for key in keys))
-    if os.environ.get('TMT_RECORD_TMT_V0_BASELINE') == '1':
-        FIXTURE.write_text(
-            json.dumps({**fixture, 'updates': actual_updates}, indent=2) + '\n'
-        )
-        pytest.skip('recorded a new TMT-v0 baseline')
-
-    def assert_reference(actual, expected, path='fixture'):
-        match expected:
-            case dict():
-                assert actual.keys() == expected.keys(), (
-                    f'{path}: got fields {list(actual)}, expected {list(expected)}'
-                )
-                for key in expected:
-                    assert_reference(actual[key], expected[key], f'{path}.{key}')
-            case list():
-                assert len(actual) == len(expected), path
-                for index, (actual_item, expected_item) in enumerate(
-                    zip(actual, expected)
-                ):
-                    assert_reference(actual_item, expected_item, f'{path}[{index}]')
-            case bool():
-                assert actual is expected, path
-            case int() | str():
-                assert actual == expected, path
-            case _:
-                assert math.isclose(actual, expected, rel_tol=1e-5, abs_tol=1e-6), path
-
-    assert_reference(actual_updates, fixture['updates'])
+# Forward steps and recurrence
 
 
 def test_recurrence(model_factory):
@@ -195,10 +46,11 @@ def test_recurrence(model_factory):
     assert mx.allclose(second_states[0]['states'], expected_state, atol=1e-06).item()
 
 
+# Objective loss and the stop token
+
+
 @pytest.fixture
 def loss_case(model_factory):
-    import math
-
     import mlx.core as mx
 
     model = model_factory()
@@ -255,6 +107,57 @@ def test_loss(loss_case, target, end, ce_only):
     assert components.keys() == expected_components.keys()
     for name, value in expected_components.items():
         assert float(components[name]) == pytest.approx(value, rel=0, abs=1e-5), name
+
+
+def test_stop_token_uses_the_shared_logits(model_factory):
+    import mlx.core as mx
+
+    model = model_factory()
+    logits, stop = model.decoder(mx.zeros((model.dim,)))
+    assert logits.shape == (257,)
+    assert float(stop.item()) == pytest.approx(float(mx.softmax(logits)[256].item()))
+    assert 'stop' not in model.decoder.parameters()
+
+    forced = mx.full((257,), -100.0)
+    forced[256] = 100.0
+    assert int(model.sample(forced).item()) == 256
+    x = mx.zeros((model.dim,))
+    expected = float((-forced[256] + mx.logsumexp(forced)).item())
+    for end in (False, True):
+        loss = model.loss(x, forced, stop, 256, end, ce_only=True)
+        assert float(loss.item()) == pytest.approx(expected)
+
+
+# Train updates and TMT-v0 gradients
+
+
+def test_train_step(monkeypatch, model_factory):
+    import mlx.core as mx
+
+    model = model_factory()
+    mx.eval(model.parameters())
+    mx.random.seed(23)
+    expected = mx.random.uniform(shape=(1,)).item()
+    mx.random.seed(23)
+
+    def reject_sample(*args, **kwargs):
+        pytest.fail('train_step sampled')
+
+    monkeypatch.setattr(model, 'sample', reject_sample)
+    output, stop, loss = model.train_step(97, 98, False)
+    assert (output.shape, stop.shape) == ((257,), (1,))
+    assert mx.random.uniform(shape=(1,)).item() == expected
+    assert float(loss.item()) == 6.899815082550049
+    assert math.isfinite(float(loss.item()))
+    assert int(model.optimizer.state['step'].item()) == 1
+
+    mx.random.seed(29)
+    expected = mx.random.uniform(shape=(1,)).item()
+    mx.random.seed(29)
+    output, stop, loss = model.train_step(98, 99, True)
+    assert mx.random.uniform(shape=(1,)).item() == expected
+    assert math.isfinite(float(loss.item()))
+    assert int(model.optimizer.state['step'].item()) == 2
 
 
 def test_tmt_v0_gradients(monkeypatch):
@@ -338,20 +241,131 @@ def test_tmt_v0_gradients(monkeypatch):
     assert analytic_embed == pytest.approx(numerical_embed, rel=0, abs=0.002)
 
 
-def test_stop_token_uses_the_shared_logits(model_factory):
+# Fixed TMT-v0 baseline
+
+
+def _array_values(array):
     import mlx.core as mx
 
-    model = model_factory()
-    logits, stop = model.decoder(mx.zeros((model.dim,)))
-    assert logits.shape == (257,)
-    assert float(stop.item()) == pytest.approx(float(mx.softmax(logits)[256].item()))
-    assert 'stop' not in model.decoder.parameters()
+    mx.eval(array)
+    return [float(value) for value in array.tolist()]
 
-    forced = mx.full((257,), -100.0)
-    forced[256] = 100.0
-    assert int(model.sample(forced).item()) == 256
-    x = mx.zeros((model.dim,))
-    expected = float((-forced[256] + mx.logsumexp(forced)).item())
-    for end in (False, True):
-        loss = model.loss(x, forced, stop, 256, end, ce_only=True)
-        assert float(loss.item()) == pytest.approx(expected)
+
+def _flatten_values(value):
+    if isinstance(value, list):
+        for item in value:
+            yield from _flatten_values(item)
+    else:
+        yield float(value)
+
+
+def _gradient_summary(array):
+    values = list(_flatten_values(array.tolist()))
+    return {
+        'sum': sum(values),
+        'sum_squares': sum(value * value for value in values),
+        'max_abs': max((abs(value) for value in values), default=0.0),
+    }
+
+
+def capture_tmt_v0_baseline(config, seed, steps, output_indices, state_rows):
+    import mlx.core as mx
+
+    from tmt.model import Model
+
+    random.seed(seed)
+    mx.random.seed(seed)
+    model = Model(**config)
+    mx.eval(model.parameters())
+
+    updates = []
+    captured_gradients = []
+    original_update_gradients = model.update_gradients
+
+    def capture_update_gradients(grads):
+        gradients = {
+            f'blocks.{index}.decay': _array_values(block_grads['decay'])
+            for index, block_grads in enumerate(grads['blocks'])
+        }
+        encoder_gradient = grads['encoder']['embed']['weight']
+        mx.eval(encoder_gradient)
+        gradients['encoder.embed.weight'] = _gradient_summary(encoder_gradient)
+        gradients['decoder.decode.bias'] = _gradient_summary(
+            grads['decoder']['decode']['bias']
+        )
+        captured_gradients.append(gradients)
+        original_update_gradients(grads)
+        mx.eval(model.parameters(), model.optimizer.state)
+
+    model.update_gradients = capture_update_gradients
+
+    for step in steps:
+        record = {'input': step['input'], 'target': step['target'], 'end': step['end']}
+        updates.append(record)
+        metrics = {}
+        output, stop, loss = model.train_step(
+            step['input'], step['target'], step['end'], metrics=metrics
+        )
+        mx.eval(output, stop, loss, *metrics.values())
+        record['logits'] = {
+            str(index): float(output[index].item())
+            for index in output_indices
+        }
+        record['prediction'] = int(mx.argmax(output).item())
+        record['stop'] = float(stop.item())
+        record['loss'] = float(loss.item())
+        record['components'] = {name: metrics[name] for name in sorted(metrics)}
+        record['gradients'] = captured_gradients.pop()
+        record['state'] = {
+            f'blocks.{index}': {
+                'states': _array_values(layer.states),
+                'decaytrace': _array_values(layer.decaytrace),
+                'embedtrace_rows': {
+                    str(byte): _array_values(layer.embedtrace[byte])
+                    for byte in state_rows
+                },
+            }
+            for index, layer in enumerate(model.blocks)
+        }
+
+    return updates
+
+
+def test_tmt_v0_baseline():
+    """Compare seeded TMT-v0 updates with the saved fixture.
+
+    After an intentional TMT-v0 change, rewrite the fixture and review it:
+        TMT_RECORD_TMT_V0_BASELINE=1 python -m pytest test/test_model.py -k baseline
+        git diff test/fixtures/tmt-v0-baseline.json
+    """
+    fixture = json.loads(FIXTURE.read_text())
+    keys = ('config', 'seed', 'steps', 'output_indices', 'state_rows')
+    actual_updates = capture_tmt_v0_baseline(*(fixture[key] for key in keys))
+    if os.environ.get('TMT_RECORD_TMT_V0_BASELINE') == '1':
+        FIXTURE.write_text(
+            json.dumps({**fixture, 'updates': actual_updates}, indent=2) + '\n'
+        )
+        pytest.skip('recorded a new TMT-v0 baseline')
+
+    def assert_reference(actual, expected, path='fixture'):
+        match expected:
+            case dict():
+                assert actual.keys() == expected.keys(), (
+                    f'{path}: got fields {list(actual)}, expected {list(expected)}'
+                )
+                for key in expected:
+                    assert_reference(actual[key], expected[key], f'{path}.{key}')
+            case list():
+                assert len(actual) == len(expected), path
+                for index, (actual_item, expected_item) in enumerate(
+                    zip(actual, expected)
+                ):
+                    assert_reference(actual_item, expected_item, f'{path}[{index}]')
+            case bool():
+                assert actual is expected, path
+            case int() | str():
+                assert actual == expected, path
+            case _:
+                assert math.isclose(actual, expected, rel_tol=1e-5, abs_tol=1e-6), path
+
+    assert_reference(actual_updates, fixture['updates'])

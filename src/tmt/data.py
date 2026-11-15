@@ -9,12 +9,9 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from . import validation
-
-if TYPE_CHECKING:
-    from .model import Model
 
 
 @dataclass(frozen=True)
@@ -77,7 +74,10 @@ def _merge(data: bytes, ranks: dict[tuple[int, int], int]) -> list[int]:
 
 
 class BPETokenizer:
-    """Byte IDs 0 to 255, stop ID 256, and ranked merge IDs from 257."""
+    """Byte IDs 0 to 255, stop ID 256, and ranked merge IDs from 257.
+
+    Without merges, this is the byte-mode tokenizer: one token per byte and 257 IDs.
+    """
 
     def __init__(self, merges: Iterable[Sequence[int]]) -> None:
         self.vocabulary = [bytes([byte]) for byte in range(256)] + [b'']
@@ -109,8 +109,13 @@ class BPETokenizer:
         )
         return cls(value['merges'])
 
-    def encode(self, data: bytes) -> list[int]:
-        return _merge(data, self._ranks)
+    def encode(self, data: bytes) -> bytes | list[int]:
+        """Return raw bytes as token IDs, unchanged when there are no merges."""
+        return _merge(data, self._ranks) if self._ranks else data
+
+    def decode(self, token: int) -> bytes:
+        """Return the bytes of one token ID. Stop ID 256 has no bytes."""
+        return self.vocabulary[token]
 
 
 def huggingface_merges(value: Any) -> list[tuple[int, int]]:
@@ -170,12 +175,3 @@ def tiktoken_merges(text: str) -> list[tuple[int, int]]:
             ranks[pair] = 257 + len(ranks)
     return list(ranks)
 
-
-def encode_document(model: Model, data: bytes) -> bytes | list[int]:
-    """Return byte IDs unchanged, or BPE IDs for a model with a tokenizer."""
-    return data if model.tokenizer is None else model.tokenizer.encode(data)
-
-
-def decode_token(model: Model, token: int) -> bytes:
-    tokenizer = model.tokenizer
-    return bytes([token]) if tokenizer is None else tokenizer.vocabulary[token]
