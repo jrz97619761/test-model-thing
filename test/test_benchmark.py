@@ -9,6 +9,8 @@ import pytest
 def evaluation_model():
     import mlx.core as mx
 
+    from tmt.data import BPETokenizer
+
     class FakeBlock:
         @property
         def state_fields(self):
@@ -46,6 +48,7 @@ def evaluation_model():
     class FakeModel:
         def __init__(self):
             self.blocks = [FakeBlock()]
+            self.tokenizer = BPETokenizer(())
             self.uniform = False
 
         def reset(self):

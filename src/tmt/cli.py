@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,7 +16,8 @@ from typing import Any, Protocol, Sequence
 
 from . import validation
 from .config import group_model_config, load_config
-from .records import build_run_manifest, write_json
+from .data import BPETokenizer, huggingface_merges, tiktoken_merges
+from .records import build_run_manifest, read_json, write_json
 from .runtime import evaluate_checkpoint, generate, inspect_checkpoint, sweep, train
 
 
@@ -43,6 +45,12 @@ def command_manual(topic: str | None = None) -> str:
     return heading + section.rstrip() + '\n'
 
 
+# Source format name and its merge reader, in help order.
+TOKENIZER_FORMATS: dict[str, Callable[[str], list[tuple[int, int]]]] = {
+    'huggingface': lambda path: huggingface_merges(read_json(path)),
+    'tiktoken': lambda path: tiktoken_merges(Path(path).read_text(encoding='utf-8')),
+}
+
 type ArgumentSpec = tuple[tuple[str, ...], dict[str, Any]]
 
 INIT_ARGUMENTS: tuple[ArgumentSpec, ...] = (
@@ -50,6 +58,19 @@ INIT_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         ('--output',),
         {'help': 'write only model JSON to PATH; default: initialize current folder'},
     ),
+)
+
+TOKENIZER_CONVERT_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (
+        ('--format',),
+        {
+            'required': True,
+            'choices': tuple(TOKENIZER_FORMATS),
+            'help': 'source tokenizer format',
+        },
+    ),
+    (('--input',), {'required': True, 'help': 'source tokenizer file'}),
+    (('--output',), {'required': True, 'help': 'new TMT tokenizer JSON file'}),
 )
 
 SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
@@ -65,7 +86,7 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 1000,
-            'help': 'target-byte optimizer updates per run; default: 1000',
+            'help': 'target-token optimizer updates per run; default: 1000',
         },
     ),
     (
@@ -96,7 +117,7 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         ('--ce-only',),
         {
             'action': 'store_true',
-            'help': 'next-byte cross entropy only; default: full TMT objective',
+            'help': 'next-token cross entropy only; default: full TMT objective',
         },
     ),
     (
@@ -119,7 +140,7 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 256,
-            'help': 'positive sample byte count; default: 256',
+            'help': 'maximum sample byte count; default: 256',
         },
     ),
     (
@@ -144,6 +165,7 @@ SHARED_TRAINING_ARGUMENTS: tuple[ArgumentSpec, ...] = (
 )
 
 TRAIN_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    (('--bpe',), {'help': 'BPE tokenizer JSON for a fresh run; default: byte mode'}),
     (
         ('checkpoint',),
         {
@@ -254,7 +276,7 @@ GENERATE_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         {
             'type': int,
             'default': 512,
-            'help': 'number of output bytes; default: 512',
+            'help': 'maximum output bytes; default: 512',
         },
     ),
     (
@@ -383,24 +405,46 @@ def _bpb(value: float | None) -> str:
     return 'none' if value is None else f'{value:.6f}'
 
 
+def _warn(message: str) -> None:
+    """Print a warning to stderr, in yellow on a terminal unless NO_COLOR is set."""
+    text = f'tmt: warning: {message}'
+    if sys.stderr.isatty() and 'NO_COLOR' not in os.environ:
+        text = f'\033[33m{text}\033[0m'
+    print(text, file=sys.stderr)
+
+
 def _validate_training_args(args: argparse.Namespace) -> None:
     validation.training_options(args.seed, args.updates, args.log_every)
     validation.positive(args.save_every, 'save-every')
     validation.monitoring(**_monitoring_options(args))
 
 
-def _resolve_train_path(
+def _check_train_combinations(
     args: argparse.Namespace, parser: argparse.ArgumentParser
-) -> tuple[dict[str, Any] | None, str | PathLike[str], bool]:
+) -> None:
+    """Reject option pairs that argparse cannot express as one exclusive group."""
+    # The parser already rejects --config with --resume.
     if args.checkpoint is not None and args.run is not None:
         parser.error('checkpoint and --run cannot be used together')
-    if args.resume and (args.checkpoint is None or args.run is not None):
+    if args.resume and args.checkpoint is None:
         parser.error('--resume requires an explicit checkpoint and forbids --run')
-    if args.run is not None:
-        validation.run_name(args.run)
-    if not glob.glob(args.data, recursive=True):
-        raise FileNotFoundError(f'no files matched {args.data!r}')
-    settings = None if args.resume else load_config(args.config or 'model.json')
+    if args.resume and args.bpe is not None:
+        parser.error('--bpe cannot be used with --resume')
+
+
+def _fresh_train_settings(args: argparse.Namespace) -> dict[str, Any]:
+    """Load model settings for a fresh run, with the optional BPE tokenizer."""
+    settings = load_config(args.config or 'model.json')
+    if args.bpe is not None:
+        settings['tokenizer'] = read_json(args.bpe)
+        BPETokenizer.from_dict(settings['tokenizer'])
+        if not settings['tokenizer']['merges']:
+            _warn(f'{args.bpe} has no merges; the model is equivalent to byte mode')
+    return settings
+
+
+def _train_checkpoint(args: argparse.Namespace) -> tuple[str | PathLike[str], bool]:
+    """Return the checkpoint path and whether it belongs to a new run folder."""
     new_run = args.checkpoint is None
     checkpoint: str | PathLike[str]
     if new_run:
@@ -417,7 +461,7 @@ def _resolve_train_path(
             raise FileExistsError(
                 f'checkpoint {checkpoint} exists; use --resume, or remove it'
             )
-    return settings, checkpoint, new_run
+    return checkpoint, new_run
 
 
 def _run_init(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -461,7 +505,13 @@ def _run_init(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
 
 def _run_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     _validate_training_args(args)
-    settings, checkpoint, new_run = _resolve_train_path(args, parser)
+    _check_train_combinations(args, parser)
+    if args.run is not None:
+        validation.run_name(args.run)
+    if not glob.glob(args.data, recursive=True):
+        raise FileNotFoundError(f'no files matched {args.data!r}')
+    settings = None if args.resume else _fresh_train_settings(args)
+    checkpoint, new_run = _train_checkpoint(args)
     train(
         settings,
         checkpoint,
@@ -567,6 +617,20 @@ def _run_help(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
     print(command_manual(), end='')
 
 
+def _run_tokenizer_convert(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    merges = TOKENIZER_FORMATS[args.format](args.input)
+    tokenizer = BPETokenizer(merges)
+    write_json(args.output, {'merges': merges}, exclusive=True)
+    print(f'wrote tokenizer: {args.output}, vocabulary: {tokenizer.vocab_size}')
+    if not merges:
+        _warn(
+            f'{args.input} gave no merges; '
+            'a model with this tokenizer is equivalent to byte mode'
+        )
+
+
 type CommandHandler = Callable[[argparse.Namespace, argparse.ArgumentParser], None]
 
 
@@ -583,6 +647,12 @@ class CommandSpec:
 COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec('init', 'write default model settings', _run_init, INIT_ARGUMENTS),
     CommandSpec(
+        'tokenizer-convert',
+        'convert external byte BPE merges',
+        _run_tokenizer_convert,
+        TOKENIZER_CONVERT_ARGUMENTS,
+    ),
+    CommandSpec(
         'train',
         'train a model on byte files',
         _run_train,
@@ -591,7 +661,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
         exclusive=TRAIN_SETTINGS_ARGUMENTS,
     ),
     CommandSpec(
-        'evaluate', 'score next-byte predictions', _run_evaluate, EVALUATE_ARGUMENTS
+        'evaluate', 'score next-token predictions', _run_evaluate, EVALUATE_ARGUMENTS
     ),
     CommandSpec(
         'benchmark',
@@ -601,7 +671,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         'generate',
-        'generate a fixed number of bytes',
+        'generate bytes until stop or byte limit',
         _run_generate,
         GENERATE_ARGUMENTS,
     ),

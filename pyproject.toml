@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "test-model-thing"
-version = "1.0.0"
+version = "1.1.0"
 description = "Experiments for the TMT byte model"
 readme = "README.md"
 license = "MIT"

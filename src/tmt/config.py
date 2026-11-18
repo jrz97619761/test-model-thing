@@ -16,6 +16,7 @@ MODEL_DEFAULTS: dict[str, Any] = {
     'rate': 0.0005,
     'bound': (40000, 120000),
     'block': 'tmt-v0',
+    'tokenizer': None,
 }
 
 _MODEL_SETTING_FIELDS = {
@@ -26,6 +27,7 @@ _MODEL_SETTING_FIELDS = {
     'rate',
     'bound',
     'block',
+    'tokenizer',
 }
 
 
@@ -37,6 +39,8 @@ def group_model_config(settings: dict[str, Any]) -> dict[str, Any]:
             name: settings[name] for name in ('dim', 'layers', 'spread')
         },
     }
+    if settings['tokenizer'] is not None:
+        model['tokenizer'] = settings['tokenizer']
     extensions = {
         name: value
         for name, value in settings.items()

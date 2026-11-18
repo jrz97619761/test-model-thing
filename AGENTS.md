@@ -10,15 +10,15 @@ All package paths below are relative to `src/tmt/`.
 
 | File | Responsibility |
 | --- | --- |
-| `model.py` | `Encoder`, `Decoder`, `Model`, objective loss, optimizer updates, and byte samples |
+| `model.py` | `Encoder`, `Decoder`, `Model`, objective loss, optimizer updates, and token sampling |
 | `blocks.py` | `Block`, the `TMTv0Block`, block registry, recurrent state, and gradient traces |
 | `config.py` | `MODEL_DEFAULTS` and grouped partial JSON configuration through `load_config()` |
 | `validation.py` | Input checks, checkpoint metadata and tensor checks, and block contracts |
 | `checkpoint.py` | Seeded model creation and Safetensors save/load |
-| `data.py` | `DataOptions`, `ByteFiles`, file selection, readability checks, and raw-byte document reads |
+| `data.py` | `DataOptions`, `ByteFiles`, file selection, readability checks, raw-byte document reads, the `BPETokenizer` for both modes, and merge converters |
 | `runtime.py` | `TrainingRun`, `TrainingOptions`, `MonitorOptions`, train loops, samples, checkpoint evaluation and inspection, generation, and sweeps |
 | `records.py` | Typed manifest records, JSON output, and JSONL output |
-| `benchmark.py` | Frozen byte evaluation, fixed byte fixtures, and optional CoLA classification |
+| `benchmark.py` | Frozen next-token evaluation in bits per byte, fixed byte fixtures, and optional CoLA classification |
 | `cli.py`, `__main__.py` | Argument parsing, command dispatch, and `python -m tmt` |
 | `commands.md` | Packaged command manual, also returned by `tmt help` |
 
@@ -74,13 +74,15 @@ The tests are in `test/`:
 
 | File | Coverage |
 | --- | --- |
-| `test_model.py` | Loss, gradients, recurrence, import behavior, and the fixed TMT-v0 baseline |
+| `test_model.py` | Import behavior, recurrence, loss and the stop token, train updates and gradients, and the fixed TMT-v0 baseline |
 | `test_blocks.py` | Block contracts, state, gradient hooks, features, and checkpoint round trips |
 | `test_benchmark.py` | Byte scores, CoLA input and output, and benchmark entry points |
 | `test_config.py` | Configuration, templates, checkpoint validation, atomic saves, and RNG preservation |
-| `test_cli.py` | Help, errors, byte files, generation, evaluation, interrupts, and installed commands |
+| `test_cli.py` | Help, errors, byte files, generation, evaluation, interrupts, `tokenizer-convert` without MLX, and installed commands |
 | `test_records.py` | Grouped run and sweep manifest records |
 | `test_train.py` | Train updates, resume, manifests, samples, evaluation intervals, and sweeps |
+| `test_tokenizer.py` | Byte mode without merges, BPE merges, tokenizer JSON checks, and converters |
+| `test_bpe.py` | BPE gradients, checkpoints, command workflows, byte scores, and stop and byte limits |
 
 `test/conftest.py` supplies shared fixtures.
 Use `run_subprocess` for child Python scripts, module commands, and installed-command checks.
@@ -91,26 +93,43 @@ Do not regenerate the baseline only to hide a regression. Review any intentional
 
 ## Model and evaluation contracts
 
-- Preserve raw-byte documents and output. The encoder has 256 byte embeddings, and the decoder returns 256 byte logits.
-- Keep defaults in `MODEL_DEFAULTS`. Direct `Model` construction requires all constructor arguments.
+### Tokens and vocabulary
+
+- Preserve raw-byte documents and output. Byte mode uses 257 embeddings and logits, with stop at ID 256. BPE mode uses one embedding and logit per vocabulary token.
+- `Model.tokenizer` is always a `BPETokenizer`. Byte mode uses one without merges. Checkpoint settings keep `tokenizer: null` for byte mode, and manifests omit `model.tokenizer`.
+- BPE uses external merge rules, with merge IDs at 257 and above. There is no BOS token. Generation and samples stop at ID 256.
+- In the CLI, BPE turns on only with `train --bpe`. Model config files and sweep grids cannot set `tokenizer`.
+- Block factories take `(dim, spread, vocab_size)`. Blocks size token-indexed arrays in the constructor.
+- The TMT-v0 embedding trace follows the vocabulary size. Preserve the recurrent equations. The stop-token vocabulary intentionally changes the earlier byte-mode numerical baseline.
+
+### Configuration and imports
+
+- Keep defaults in `MODEL_DEFAULTS`. Direct `Model` construction requires the original seven settings. The optional `tokenizer` defaults to byte mode.
 - Model config JSON uses `model` and `hparams` groups. `load_config()` accepts grouped partial input only. An empty object uses all defaults. It returns flat settings for `Model` and checkpoint metadata.
 - Keep `DataOptions` in `data.py`. `TrainingOptions` and `MonitorOptions` group internal train inputs. Keep the public `train()` and `sweep()` arguments stable.
 - Preserve config validation, examples, and checkpoint metadata when model fields change.
 - Keep imports free of prompts, model runs, and file writes.
-- Preserve help and version commands without MLX imports. Inspect the imports in CLI dependencies as well as `cli.py`.
+- Preserve help, version, and `tokenizer-convert` without MLX imports. Inspect the imports in CLI dependencies as well as `cli.py`.
+
+### Training and gradients
+
 - Keep `train_step()` free of samples and sample RNG changes. `Model.__call__()` also samples, so these methods are not interchangeable.
 - Preserve TMT-v0 gradient contributions and the distinction between recurrent state and gradient traces.
 - A frozen step advances recurrent state without optimizer updates or trace updates.
 - Preserve state and trace restoration in `benchmark.evaluate()` and `runtime._training_sample()` after success or failure.
 - Review MLX evaluation boundaries, `stop_gradient`, and compiled optimizer state when arithmetic changes.
 
+### Evaluation
+
 `benchmark.py` defines `BYTE_FIXTURE`, `BYTE_DOCUMENTS`, and `CONTEXT_WINDOWS` for the fixed byte suite.
 CoLA uses a separate classifier head while the model weights stay frozen.
-The Python result uses `byte_scores` and `epoch_scores`, plus `feature_source` when CoLA runs.
-The `--output` file adds `checkpoint`, `optimizer_step`, and `seed` after the result fields. The `evaluate` result ends with `checkpoint` and `optimizer_step`.
+The `benchmark.run()` result uses `byte_scores` and `epoch_scores`, plus `feature_source` when CoLA runs.
+The `benchmark --output` file adds `checkpoint`, `optimizer_step`, and `seed` after the result fields. The `evaluate` result ends with `checkpoint` and `optimizer_step`.
 The CoLA MCC values use a scale of 100.
 
 Keep objective loss, frozen bits per byte, and CoLA MCC distinct in reports.
+One evaluator serves both modes. BPB divides by the bytes of the target tokens. Context windows encode their exact byte suffix again.
+Evaluation results contain `scored_bytes` and `common_scored_bytes` in both modes.
 Record configuration, seeds, data selection, and budgets for experiments.
 Identify any fixture change that prevents direct score comparisons.
 
@@ -118,7 +137,7 @@ Identify any fixture change that prevents direct score comparisons.
 
 `checkpoint.py` saves model parameters, block runtime arrays, and optimizer tensors.
 The Safetensors metadata contains a `tmt` JSON string with `version: 1` and the flat resolved model configuration.
-The loader requires the current metadata fields and exact tensor names, shapes, and dtypes.
+The loader requires the current metadata fields and exact tensor names, shapes, and dtypes. BPE metadata contains the full tokenizer specification.
 Grouped config input resolves to flat settings before model construction and checkpoint save.
 
 - Preserve strict checkpoint validation and flat checkpoint metadata. Do not add fallback support for flat model configs or run manifests.
@@ -141,15 +160,14 @@ Sweep result rows group model settings, hyperparameters, data selections, traini
 Loss, sample, and interval-evaluation JSONL rows keep their flat field names.
 
 The CLI refuses a fresh run at an existing explicit checkpoint path.
-The trainer resets recurrent state and traces for each nonempty document.
+The trainer resets recurrent state and traces for each nonempty document. Each final document token predicts stop ID 256, including one-token documents.
 File order uses a separate seeded Python RNG.
 
-`TrainingRun.after_update()` controls loss reports, terminal-byte consumption, samples, evaluation, and periodic saves at each `save_every` interval.
+`TrainingRun.after_update()` controls loss reports, samples, evaluation, and periodic saves at each `save_every` interval.
 The trainer also saves at normal completion. It rewrites `run.json` after each save, and records `error` when an exception fails the run.
 On the main thread, its SIGINT and SIGTERM handler records an interrupt request.
 The trainer checks the request at complete update boundaries, after the update actions.
 It saves before it raises `KeyboardInterrupt` for that request.
-
 Worker threads do not install that handler.
 
 `cli.console_main()` is the entry point for the console script and `python -m tmt`.

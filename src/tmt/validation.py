@@ -189,7 +189,7 @@ def _model_core_settings(settings: Mapping[str, Any], label: str) -> None:
 def _model_extension_settings(
     settings: Mapping[str, Any], label: str, defaults: Mapping[str, Any]
 ) -> None:
-    core = {'dim', 'layers', 'spread', 'temp', 'rate', 'bound'}
+    core = {'dim', 'layers', 'spread', 'temp', 'rate', 'bound', 'tokenizer'}
     for name, default in defaults.items():
         if name in core:
             continue
@@ -279,6 +279,7 @@ def sweep_grid(grid: Any, settings: Mapping[str, Any]) -> None:
             isinstance(axis, list) and axis,
             f'sweep grid field {key!r} must be a nonempty array',
         )
+        require(key != 'tokenizer', 'sweep grid cannot set tokenizer; use train --bpe')
         for value in axis:
             if key == 'seed':
                 seed(value, 'sweep grid seed')

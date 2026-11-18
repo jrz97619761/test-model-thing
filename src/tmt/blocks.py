@@ -1,4 +1,4 @@
-"""Byte-step block contract, the TMT-v0 block, and the block registry."""
+"""Token-step block contract, the TMT-v0 block, and the block registry."""
 
 from __future__ import annotations
 
@@ -19,7 +19,11 @@ type RuntimeSchema = tuple[tuple[str, tuple[int, ...], mx.Dtype], ...]
 
 
 class Block(nn.Module):
-    """Byte-step block with fixed, frozen runtime arrays."""
+    """Token-step block with fixed, frozen runtime arrays.
+
+    Block factories take `(dim, spread, vocab_size)`. Size token-indexed runtime
+    arrays from `vocab_size` in the constructor, before `validate()` runs.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -132,14 +136,14 @@ class TMTv0Block(Block):
     def feature_source(self) -> FeatureSource:
         return 'recurrent-state'
 
-    def __init__(self, dim: int, spread: int) -> None:
+    def __init__(self, dim: int, spread: int, vocab_size: int) -> None:
         super().__init__()
         halflives = mx.exp(mx.linspace(0.0, math.log(float(spread)), dim))
         retention = mx.exp(-math.log(2.0) / halflives)
         self.decay = mx.log(retention) - mx.log1p(-retention)
         self.states = mx.zeros((dim,))
         self.decaytrace = mx.zeros((dim,))
-        self.embedtrace = mx.zeros((256, dim))
+        self.embedtrace = mx.zeros((vocab_size, dim))
         self.norm = nn.LayerNorm(dim)
         self.weights = nn.Linear(dim, dim, bias=False)
         self.silu = nn.SiLU()
@@ -164,7 +168,7 @@ class TMTv0Block(Block):
         grads: GradientTree,
     ) -> tuple[GradientTree, mx.array | None, dict[str, mx.array]]:
         decay = aux
-        c_range = (mx.arange(256) == byte)[:, None].astype(mx.float32)
+        c_range = (mx.arange(len(self.embedtrace)) == byte)[:, None].astype(mx.float32)
         decay_embedtrace = self.embedtrace * decay
         embedtrace = decay_embedtrace + c_range
         decaytrace = (decay * self.decaytrace) + (decay * (1.0 - decay) * self.states)

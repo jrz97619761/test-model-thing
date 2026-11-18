@@ -11,9 +11,9 @@ if __name__ == '__main__':
     raise SystemExit(console_main(['benchmark', *sys.argv[1:]]))
 
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from os import PathLike
-from typing import Any
+from typing import Any, NamedTuple
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -80,8 +80,8 @@ def rollout(model: Model, sentence: bytes) -> mx.array | None:
     model.reset()
 
     x = None
-    for byte in sentence:
-        (x, _, _), _ = model.step(mx.array(byte), frozen=True)
+    for token in model.tokenizer.encode(sentence):
+        (x, _, _), _ = model.step(mx.array(token), frozen=True)
     if x is None:
         return None
 
@@ -101,85 +101,121 @@ def rollout(model: Model, sentence: bytes) -> mx.array | None:
     return features
 
 
+class _Target(NamedTuple):
+    """One scored next token and its byte span in the source document."""
+
+    document: bytes
+    token: int
+    start: int
+    size: int
+
+
+def _targets(
+    model: Model, documents: tuple[bytes, ...], encoded: list[Sequence[int]]
+) -> list[_Target]:
+    """List every token after the first in each document, in document order."""
+    targets = []
+    for document, tokens in zip(documents, encoded):
+        start = 0
+        for index, token in enumerate(tokens):
+            size = len(model.tokenizer.decode(token))
+            if index:
+                targets.append(_Target(document, token, start, size))
+            start += size
+    return targets
+
+
 def evaluate(
     model: Model, documents: Iterable[bytes], windows: Iterable[int] = ()
 ) -> dict[str, Any]:
-    """Score next bytes with frozen steps and restore live model state."""
+    """Score next tokens in bits per target byte and restore live model state.
+
+    Byte mode scores one byte per target. A window encodes its byte suffix again,
+    so its BPE tokens can differ from the full-document tokens.
+    """
     documents, windows = tuple(documents), tuple(windows)
     if any(window <= 0 for window in windows):
         raise ValueError('evaluation windows must be positive')
-    input_bytes = sum(len(document) for document in documents)
-    targets = validation.evaluation_targets(documents)
-    common_start = max(windows) if windows else None
+    encoded = [model.tokenizer.encode(document) for document in documents]
+    targets = _targets(model, documents, encoded)
+    if not targets:
+        raise ValueError(
+            'evaluation requires at least one target token pair '
+            '(a document with at least two tokens)'
+        )
+    common_start = max(windows, default=None)
+    common = [
+        common_start is not None and target.start >= common_start
+        for target in targets
+    ]
+    common_targets = sum(common)
+    scored_bytes = sum(target.size for target in targets)
+    common_bytes = sum(target.size for target, chosen in zip(targets, common) if chosen)
     snapshot = model.snapshot_state()
-    full_nll = common_nll = 0.0
-    common_targets = 0
 
     def evaluation_step(current):
-        (_, _, _), (logits, _) = model.step(mx.array(current), frozen=True)
+        _, (logits, _) = model.step(mx.array(current), frozen=True)
         return logits
 
     def negative_log_likelihood(logits, target):
         return float((mx.logsumexp(logits) - logits[target]).item())
 
-    def bits_per_byte(nll_sum, target_count):
-        return nll_sum / (math.log(2.0) * target_count)
+    def bits_per_byte(losses, common_only=False):
+        if common_only:
+            if not common_bytes:
+                return None
+            nll = sum(loss for loss, chosen in zip(losses, common) if chosen)
+            return nll / (math.log(2.0) * common_bytes)
+        return sum(losses) / (math.log(2.0) * scored_bytes)
 
     try:
-        for document in documents:
+        full = []
+        for tokens in encoded:
             model.reset()
-            for offset, current in enumerate(document):
+            logits = None
+            for index, current in enumerate(tokens):
+                if index:
+                    full.append(negative_log_likelihood(logits, current))
+                # The final token is consumed without a target, as in training.
                 logits = evaluation_step(current)
-                target_offset = offset + 1
-                if target_offset < len(document):
-                    loss = negative_log_likelihood(logits, document[target_offset])
-                    full_nll += loss
-                    if common_start is not None and target_offset >= common_start:
-                        common_nll += loss
-                        common_targets += 1
             model.eval_state()
 
-        scores = []
+        by_window = []
         for window in windows:
-            window_nll = window_common_nll = 0.0
-            for document in documents:
-                for target_offset in range(1, len(document)):
-                    model.reset()
-                    start = max(0, target_offset - window)
-                    logits = None
-                    for current in document[start:target_offset]:
-                        logits = evaluation_step(current)
-                    loss = negative_log_likelihood(logits, document[target_offset])
-                    window_nll += loss
-                    if common_start is not None and target_offset >= common_start:
-                        window_common_nll += loss
-            common_bpb = (
-                bits_per_byte(window_common_nll, common_targets)
-                if common_targets
-                else None
-            )
-            scores.append(
-                {
-                    'window': window,
-                    'bpb': bits_per_byte(window_nll, targets),
-                    'common_bpb': common_bpb,
-                    'delta_bpb': common_bpb - bits_per_byte(common_nll, common_targets)
-                    if common_targets
-                    else None,
-                }
-            )
+            losses = []
+            for target in targets:
+                model.reset()
+                context = target.document[max(0, target.start - window):target.start]
+                for current in model.tokenizer.encode(context):
+                    logits = evaluation_step(current)
+                losses.append(negative_log_likelihood(logits, target.token))
+            by_window.append(losses)
     finally:
         model.restore_state(snapshot)
         model.eval_state()
 
+    common_bpb = bits_per_byte(full, common_only=True)
+    scores = []
+    for window, losses in zip(windows, by_window):
+        window_common_bpb = bits_per_byte(losses, common_only=True)
+        scores.append(
+            {
+                'window': window,
+                'bpb': bits_per_byte(losses),
+                'common_bpb': window_common_bpb,
+                'delta_bpb': None
+                if window_common_bpb is None
+                else window_common_bpb - common_bpb,
+            }
+        )
     return {
-        'input_bytes': input_bytes,
-        'targets': targets,
-        'bpb': bits_per_byte(full_nll, targets),
+        'input_bytes': sum(len(document) for document in documents),
+        'targets': len(targets),
+        'scored_bytes': scored_bytes,
+        'bpb': bits_per_byte(full),
         'common_targets': common_targets,
-        'common_bpb': bits_per_byte(common_nll, common_targets)
-        if common_targets
-        else None,
+        'common_scored_bytes': common_bytes,
+        'common_bpb': common_bpb,
         'windows': scores,
     }
 

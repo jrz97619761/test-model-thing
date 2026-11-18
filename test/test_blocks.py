@@ -16,7 +16,7 @@ class MatrixCache(Block):
     def trace_fields(self):
         return ('history',)
 
-    def __init__(self, dim, spread):
+    def __init__(self, dim, spread, vocab_size):
         super().__init__()
         self.proj = nn.Linear(dim, dim, bias=False)
         self.matrix = mx.zeros((dim, dim))
@@ -34,7 +34,7 @@ class MatrixCache(Block):
 
 
 class NoWeights(Block):
-    def __init__(self, dim, spread):
+    def __init__(self, dim, spread, vocab_size):
         super().__init__()
 
     def __call__(self, enc, x, probe):
@@ -42,8 +42,8 @@ class NoWeights(Block):
 
 
 class Unfrozen(MatrixCache):
-    def __init__(self, dim, spread):
-        super().__init__(dim, spread)
+    def __init__(self, dim, spread, vocab_size):
+        super().__init__(dim, spread, vocab_size)
         self.unfreeze(keys=['cache'], recurse=False)
 
 
@@ -85,7 +85,7 @@ def make_model(tiny_settings):
     ids=['base', 'tmt-v0', 'custom-block'],
 )
 def test_block_contract_properties(block_type, expected):
-    block = Block() if block_type is Block else block_type(4, 4)
+    block = Block() if block_type is Block else block_type(4, 4, 257)
     fields = ('state_fields', 'trace_fields', 'temporal_gradient', 'feature_source')
     for field, original in zip(fields, expected):
         assert getattr(block, field) == original, f'{field} getter is wrong'
@@ -123,7 +123,7 @@ def test_invalid_block_labels(monkeypatch, tiny_settings, field, value):
 
 @pytest.mark.parametrize('operation', ['commit', 'restore', 'result'])
 def test_layer_value_validation_is_lazy(operation):
-    layer = TMTv0Block(4, 4)
+    layer = TMTv0Block(4, 4, 257)
     assert layer._runtime_schema is None
 
     def check():
@@ -171,7 +171,7 @@ def test_training_updates_parameters_and_optimizer(
     monkeypatch.setattr(model, 'update_gradients', capture)
     for current, target in [(65, 66), (66, 67), (67, 68)]:
         output, _, loss = model.train_step(current, target, False)
-        assert output.shape == (256,)
+        assert output.shape == (257,)
         assert mx.isfinite(loss).item()
     assert model.optimizer.state['step'].item() == 3
     assert model.compiled is not None
