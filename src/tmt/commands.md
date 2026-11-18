@@ -1,0 +1,722 @@
+# TMT command manual
+Use Python 3.12, 3.13, or 3.14. Install TMT with pip. Most commands need MLX. Help, version, and `tokenizer-convert` requests do not.
+
+File errors and invalid values print a short error to stderr and exit with code `1`. Argument errors exit with code `2`.
+
+Warnings print to stderr with the prefix `tmt: warning:`. On a terminal they are yellow, unless the `NO_COLOR` environment variable is set. A warning does not stop the command or change its exit code.
+
+Relative paths use the current directory. The CLI does not search parent folders for files or runs.
+
+## Documents and tokens
+
+Data globs select raw files. The CLI expands each glob itself, with `**` for recursive matches, and sorts the matched paths. Each file is one document, and the model resets at each document boundary. The CLI reads file contents as bytes, adds no separators, and does not decode them as text.
+
+Byte mode is the default. It has 257 token IDs, embeddings, and logits. IDs 0 to 255 are bytes, and ID 256 is the stop token. A BPE model adds one ID for each merge, from ID 257. Input bytes never encode to stop ID 256, and there is no BOS token. The final token of each document is trained to predict stop ID 256.
+
+Only `train --bpe` creates a BPE model. Model config files and sweep grids cannot set the tokenizer, so sweeps use byte mode. The checkpoint stores the tokenizer. Resume, evaluation, benchmark, generation, and inspection use the stored tokenizer.
+
+## Seeds and option checks
+
+`--seed`, `--sample-seed`, and sweep grid seed values must be integers from `0` to `18446744073709551615`, inclusive. Boolean grid seed values are invalid. The CLI checks these limits before model work or run folder creation, even when a seed has no effect.
+
+Direct Python seed values use the same limits. `tmt.runtime.train()`, `tmt.runtime.sweep()`, `tmt.runtime.generate()`, `tmt.benchmark.run()`, and `tmt.checkpoint.new_model()` require a primary seed. `train()` and `sweep()` also require `updates`, and `sweep()` requires its base config path. Pass their other options as keywords. Pass `seed=...` to `tmt.benchmark.run()`. The separate `sample_seed` argument remains optional and defaults to `11` for `train()` and `sweep()`.
+
+Train, sweep, generate, and benchmark require `--seed N`. Fresh model creation sets Python's `random` seed and MLX's random seed. Train and sweep use a separate seeded Python RNG for file order. Checkpoint load, generation, and the CoLA head setup preserve the caller's Python and MLX RNG state, also after an error.
+
+A sweep requires its base seed even when the grid has a `seed` field. Each grid seed sets one candidate's seed. `--sample-seed` sets the sample seed. Evaluate does not sample or change the caller's RNG state.
+
+`--sample-prompt` must be nonempty. `--sample-bytes` and `--eval-max-bytes` must be positive. These checks apply when sample or interval evaluation options are off.
+
+## Model configuration
+
+Model config JSON groups model shape under `model` and optimizer and sampler values under `hparams`.
+`model.dimensions` contains `dim`, `layers`, and `spread`. `model.block` selects the block factory.
+`hparams.optimizer` contains `rate` and `bound`. `hparams.sampling` contains `temp`.
+`model.extensions` holds extra fields that `MODEL_DEFAULTS` adds to the core settings. The current defaults add no extra fields, so this group must be empty or absent.
+A `tokenizer` field is an error. Use `train --bpe` for BPE.
+
+The dimension defaults are `dim=512`, `layers=16`, and `spread=32`.
+The optimizer defaults are `rate=0.0005` and `bound=[40000, 120000]`.
+The sample temperature defaults to `0.75`. The block default is `"tmt-v0"`. The package registers only the `tmt-v0` block.
+
+The optimizer is MLX AdamW. With `bound = [start, end]`, update `N`, counted from 1 across resumes, uses the update rate `rate × (1 − 0.9 × p)`, where `p = clip((N − start) / (end − start), 0, 1)`. So the rate stays at `rate` through update `start` and falls linearly to `0.1 × rate` at update `end`.
+
+`temp` is a unitless sampler value. The sampler divides the logits by `max(0.1, temp × (1 − temp × H))`, where `H` is the entropy of the predicted distribution divided by `ln(vocab_size)`. Training objectives do not use `temp`.
+
+The full TMT objective combines variance, latent-space prediction, and next-token cross entropy.
+
+`tmt.config.MODEL_DEFAULTS` supplies these defaults. `load_config()` accepts grouped partial JSON only.
+An empty JSON object uses all defaults. The loader rejects flat top-level model fields, and there is no automatic converter from flat configs.
+The loader returns flat settings for `Model` and checkpoint metadata. The flat settings include `tokenizer`, which is `null` in byte mode.
+For example, grouped model config uses this form:
+
+```json
+{
+  "model": {
+    "block": "tmt-v0",
+    "dimensions": {"dim": 4, "layers": 1, "spread": 4}
+  },
+  "hparams": {
+    "optimizer": {"rate": 0.0005, "bound": [40000, 120000]},
+    "sampling": {"temp": 0.75}
+  }
+}
+```
+
+`dim`, `layers`, and `spread` must be positive integers. `temp` must be a finite nonnegative number. `rate` must be a finite positive number. `bound` must be a JSON array of two integers with `0 <= start < end`.
+
+`block` must name a registered block. Boolean values are invalid for numeric fields. The CLI checks config values and sweep grid values before model creation or output creation.
+
+Direct Python calls to `Model` require all seven settings. The optional `tokenizer` argument defaults to byte mode. `Model.tokenizer` is always a `BPETokenizer`. Byte mode uses one without merges, so it has 257 token IDs and one token per byte. For example:
+
+```python
+from tmt.config import load_config
+from tmt.model import Model
+
+settings = load_config()
+settings.update(dim=4, layers=1, spread=4)
+model = Model(**settings)
+```
+
+## Wheel distribution
+
+The project uses Setuptools and supports Python 3.12, 3.13, and 3.14. The `build` tool is for maintainers. It is not a runtime dependency.
+
+From the repository root, use an active virtual environment with a supported Python version. Install the build tool:
+
+```bash
+python -m pip install build
+```
+
+Build a wheel:
+
+```bash
+python -m build --wheel
+```
+
+The build creates `dist/test_model_thing-1.1.0-py3-none-any.whl` for the current project version. It uses an isolated build environment and does not install TMT or publish files.
+
+Install that wheel in the target virtual environment:
+
+```bash
+python -m pip install dist/test_model_thing-1.1.0-py3-none-any.whl
+tmt --version
+tmt help
+```
+
+Use the wheel path that matches the project version. From another directory, supply its full path. Pip installs the declared dependencies and creates the `tmt` command. The wheel contains the Python package and `commands.md`. MLX needs a compatible runtime.
+
+For local development, use `python -m pip install -e '.[test]'`. This installs pytest and uses the source files directly. You can also install the package with `python -m pip install .`.
+
+## Blocks
+
+The `block` field selects one factory for every layer. The current package registers only `tmt-v0`.
+Use `"block": "tmt-v0"` for the default block, or replace `tmt-v0` with a factory name from `src/tmt/blocks.py`.
+A custom block needs a local factory entry in `src/tmt/blocks.py`.
+
+### Factory and forward call
+
+Each factory creates one fresh block per layer. The model calls each factory as `factory(dim, spread, vocab_size)`. A block sizes its token-indexed arrays from `vocab_size` in its constructor. TMT-v0 uses it for its embedding trace.
+`Block.__init__()` does not inspect subclass arrays. `Model` calls `validate()` after it creates each block, so `validate()` checks the completed block.
+
+The block call uses `enc`, `x`, and `probe` inputs.
+It returns `(x_next, next_state, aux)`. `x_next` has shape `[dim]` and keeps the model dtype.
+`next_state` is a dictionary with exactly the field names in `state_fields`.
+The forward call returns candidate state. It does not change persistent arrays.
+
+The Python method `Model.step()` returns `((x, state_results, auxiliary_results), (logits, stop))`.
+`state_results` contains one dictionary per block, with keys from `state_fields`.
+`auxiliary_results` contains one block-specific value per block.
+`stop` is the softmax probability of token 256. There is no separate stop head.
+`loss()` does not use its `stop` and `end` arguments. A stop update uses target ID 256.
+
+### Contract properties
+
+`Block` exposes `state_fields`, `trace_fields`, `temporal_gradient`, and `feature_source` as properties without setters.
+The allowed `temporal_gradient` values are `one-step-autodiff` and `tmt-v0`.
+The allowed `feature_source` values are `final-output` and `recurrent-state`.
+Override these getters in a custom block. For example:
+
+```python
+@property
+def state_fields(self):
+    return ('cache',)
+```
+
+These properties describe the block contract. Instance assignment and deletion raise `AttributeError`.
+
+### State and traces
+
+`state_fields` lists public arrays that advance on each token. `trace_fields` lists public arrays for temporal gradient history.
+Blocks create these fields before optimizer setup and freeze them as runtime state.
+All block parameters stay in the normal MLX parameter tree.
+Block state shapes stay fixed for the life of the model.
+
+`reset()` clears state and traces at each document boundary.
+The model commits candidate state after differentiation, or after a frozen step.
+Frozen steps advance only `state_fields`. They do not change traces, weights, or optimizer state.
+
+The helper names are `snapshot_state()`, `restore_state()`, `commit_state()`, and `eval_state()`.
+Blocks use these helpers to copy, restore, commit, and evaluate declared fields.
+Direct calls to `restore_state()`, `commit_state()`, or `validate_result()` build the runtime schema on first use.
+The model applies snapshot, restore, and evaluation across all blocks.
+Evaluation and samples restore state after success or error.
+
+### Gradient hooks
+
+`probe()` returns an auxiliary value for differentiation.
+The default probe is an unused scalar. TMT-v0 returns a zero vector with shape `[dim]`.
+The `adjust_gradients()` hook receives the token ID, candidate state, auxiliary data, probe cotangent, and local gradients.
+The hook returns `(grads, encoder_addition, traces)`.
+
+The default hook returns autodiff gradients unchanged, no encoder gradient addition, and no trace updates.
+An empty trace dictionary leaves traces unchanged. A trace update must contain every name in `trace_fields`.
+
+The TMT-v0 hook uses label `tmt-v0`. It adds the prior temporal trace contributions for block decay and the shared encoder.
+The default label is `one-step-autodiff`. It covers gradients within one token step.
+It does not propagate gradients through detached token history.
+
+### Features
+
+`features(x)` returns one `[dim]` vector for CoLA. The `feature_source` property reports `final-output` when the block uses `x`.
+TMT-v0 uses its recurrent state and reports `recurrent-state`.
+The CoLA result uses the JSON key `feature_source`.
+
+### Checkpoints
+
+Resolved model config and checkpoint metadata both contain `block` and `tokenizer`.
+The checkpoint loader requires every current config field. It does not add a default for missing metadata.
+
+Use `tmt.checkpoint.load_checkpoint(path)` to load a checkpoint in Python. It returns `(model, settings)`.
+
+## init
+
+Create model and sweep templates in the current folder, or write one model config at a chosen path.
+
+### Syntax
+```text
+tmt init [--output PATH]
+```
+
+### Requirements and options
+
+- `--output PATH` is optional. It writes only model JSON to `PATH`. Without this option, `init` prepares the current folder.
+- The destination folder must allow file and directory creation.
+- `init` reads `MODEL_DEFAULTS` from `tmt.config` and needs MLX. It does not create a model, checkpoint, or run record.
+
+### Workflow
+
+1. Go to the folder for the workspace.
+2. Run `tmt init`.
+3. Edit `model.json` to set small model values for a first run.
+4. Put one or more raw-byte files in `data/train/`.
+
+```bash
+tmt init --output configs/model.json
+```
+
+### Behavior and files
+Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed.
+`model.json` stores dimensions under `model.dimensions` and the block under `model.block`.
+It stores optimizer and sampler values under `hparams`. Edit it before a real experiment.
+
+`grid.json` keeps flat axes named `dim`, `layers`, `spread`, `block`, and `seed`.
+It has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, `block=["tmt-v0"]`, and `seed=[11,22]`.
+Grid axes use flat model field names, even when `model.json` uses grouped config.
+
+`run.example.json` shows the grouped manifest fields with an empty train file list.
+It sets `model.trainable_parameters`, `model.temporal_gradient`, `data.evaluation`, `monitoring.sample`, `monitoring.evaluation`, `run.started_at`, `run.last_checkpoint`, and `run.error` to `null`.
+It is a template, not a run record.
+
+The command opens each JSON destination in exclusive-create mode. If a destination exists, the command stops with a `FileExistsError`, and the old file stays intact. Bare `tmt init` writes `model.json`, `grid.json`, and `run.example.json` in that order, so files written before the error remain.
+
+The `--output` form creates parent folders as needed. It writes only the model config and does not create workspace folders.
+
+## tokenizer-convert
+
+Convert merges from an external byte-level BPE tokenizer into the TMT tokenizer JSON. TMT does not train tokenizers.
+
+### Syntax
+```text
+tmt tokenizer-convert --format {huggingface,tiktoken} --input PATH --output PATH
+```
+
+### Requirements and options
+
+- `--format` is required. `huggingface` reads a `tokenizer.json` file. `tiktoken` reads a mergeable-ranks file.
+- `--input PATH` is required and names the source file.
+- `--output PATH` is required. The output path must be new. Its parent folder must exist.
+
+### Workflow
+
+```bash
+tmt tokenizer-convert --format tiktoken --input vocab.tiktoken --output tokenizer.json
+tmt train --bpe tokenizer.json --data 'data/train/*' --run bpe --seed 11
+```
+
+### Behavior and files
+The TMT tokenizer JSON has one field, `merges`, an ordered array of token ID pairs. Merge `N` creates token ID `257 + N`.
+For example, `{"merges": [[97, 98], [257, 257]]}` creates `ab` as ID 257 and `abab` as ID 258.
+The encoder applies the lowest-ranked adjacent pair first. It adds no BOS token, and input bytes never produce stop token 256.
+
+The Hugging Face file must contain a `BPE` model with the ByteLevel byte alphabet. A normalizer, a pre-tokenizer, or added tokens cause an error.
+The tiktoken file contains one base64 token and its rank on each line. It must rank all 256 single bytes. In rank order, the earlier merges must encode each longer token to exactly two tokens. That pair becomes the next merge. TMT does not apply the external regex split, so its token boundaries can differ from the source tokenizer.
+Converted token IDs differ from the source IDs, so external model weights are not compatible.
+The command prints the output path and the vocabulary size, including the 257 byte and stop IDs.
+If the source gives no merges, the command still writes the file and then prints a warning. A model with that tokenizer is equivalent to byte mode.
+
+## train
+
+Train a model on raw-byte documents and save a strict model and optimizer checkpoint.
+
+### Syntax
+```text
+tmt train [CHECKPOINT] --data GLOB --seed N [--config PATH | --resume] [--bpe PATH] [--run NAME] [--updates N] [--log-every N] [--save-every N] [--ce-only] [--sample-every N] [--sample-prompt TEXT] [--sample-seed N] [--sample-bytes N] [--eval-data GLOB --eval-every N] [--eval-max-bytes N]
+```
+
+### Requirements and options
+
+- `CHECKPOINT` is an optional checkpoint path for a fresh run. The file must not exist. With `--resume`, it is required and names the checkpoint to load.
+- `--data GLOB` is required. Quote the glob so the CLI, not the shell, expands it.
+- `--config PATH` supplies model JSON values for a fresh run. Missing values use model defaults. The default path is `model.json` in the current folder. This option cannot be used with `--resume`.
+- `--bpe PATH` trains a fresh BPE model with the tokenizer JSON from `tokenizer-convert`. Without it, the model uses byte mode. It cannot be used with `--resume`. A tokenizer with no merges gives a warning, because the model is then equivalent to byte mode. The checkpoint still stores that tokenizer.
+- `--resume` loads model and optimizer tensors from `CHECKPOINT`. It cannot be used with `--run`, `--config`, or `--bpe`.
+- `--run NAME` creates `runs/NAME/`. Use one relative folder name without path separators. Empty names, `.` and `..` are invalid. Do not combine it with `CHECKPOINT` or `--resume`. Use `CHECKPOINT` for an arbitrary path.
+- `--updates N` sets target-token optimizer updates. The default is `1000`. Use a positive value. On resume, this count is added to the saved optimizer step.
+- `--log-every N` sets the progress interval in updates during a train run. The default is `100`. Use a positive value.
+- `--save-every N` sets the checkpoint save interval in updates. The default is `500`. Use a positive value. The command also saves at the end.
+- `--seed N` sets the model initialization and file-order seed. This option is required.
+- `--ce-only` uses next-token cross entropy. Without it, the command uses the full TMT objective.
+- `--sample-every N` writes a sample after each N completed updates. The command writes no samples by default. Use a positive value.
+- `--sample-prompt TEXT` sets the nonempty sample prompt. The default is `The `.
+- `--sample-seed N` sets the sample seed. The default is `11`.
+- `--sample-bytes N` sets the maximum number of output bytes. Stop token 256 can end the sample earlier. The default is `256`. Use a positive value.
+- `--eval-data GLOB` selects held-out raw-byte files for interval evaluation. Quote the glob.
+- `--eval-every N` sets the evaluation interval in updates. Use a positive value. Set this option with `--eval-data`.
+- `--eval-max-bytes N` sets the global input-byte budget for each evaluation. The default is `8192` bytes. Use a positive value.
+- Get MLX, a valid model config, and at least one file that matches `GLOB` for a fresh run. At least one selected file must contain one or more bytes. The command finds this only in the first data pass, after it creates the run folder.
+
+### Workflow
+
+1. Run `tmt init` in the workspace.
+2. Edit `model.json`, then add raw-byte files under `data/train/`.
+3. Start a named run with the example command.
+4. To add updates, pass that path and `--resume`.
+
+```bash
+tmt train --data 'data/train/*' --run first --updates 3 --seed 11
+tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 2 --seed 11
+```
+
+### Behavior and files
+The CLI sorts matched paths and shuffles them once from `--seed`. It repeats that order until it reaches `--updates`. Each adjacent token pair gives one target-token update, and the final token of each nonempty file gives one update toward stop token 256. Byte mode uses one token per byte. The model resets block state and temporal traces at each file boundary. Empty files give no update. The checkpoint stores the `--bpe` tokenizer, and resume, evaluation, benchmark, and generation use it.
+
+A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder. The command checks train and evaluation selections before folder creation. The evaluation selection must contain at least one document with two or more bytes. In BPE mode, the tokens are checked only at the first evaluation. If no selected document encodes to two or more tokens, the run fails at that point.
+
+Unmatched globs and unreadable files cause an input error. After an input error, correct the input and retry with the same run name. A failure after the run starts leaves the run folder with its manifest, so a retry needs a new run name. A train selection without a nonempty file is such a failure. The run fails in its first data pass with status `failed`.
+
+A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp run stores it at `runs/<TIMESTAMP>/manifest/run.json`. An explicit checkpoint stores it at `manifest/run.json` under its parent folder.
+
+| Field path | Meaning |
+| --- | --- |
+| `model.block` | Block factory for each layer. |
+| `model.dimensions` | `dim`, `layers`, and `spread` for this model. |
+| `model.tokenizer` | BPE tokenizer JSON from `--bpe`. Byte-mode manifests omit this field. |
+| `model.extensions` | Optional extra settings from `MODEL_DEFAULTS`. |
+| `model.trainable_parameters` | Trainable tensor element count before a full-model freeze. It excludes runtime state and traces. |
+| `model.temporal_gradient` | Ordered list of temporal-gradient labels, one for each block in the layer stack. |
+| `hparams.optimizer` | `rate` and `bound` used by the optimizer. |
+| `hparams.sampling.temp` | Sampling temperature. |
+| `data.train.glob` | Train glob as supplied. Relative globs use the invocation directory. |
+| `data.train.files` | Matched absolute train paths, in the shuffled order for each data pass. |
+| `data.evaluation` | Evaluation `glob`, selected `files`, and `max_bytes`, or `null` when evaluation is disabled. |
+| `training.seed` | Model initialization and file-order seed for this invocation. |
+| `training.updates` | Requested target-token optimizer updates. Resume adds this budget to the saved optimizer step. |
+| `training.objective` | `tmt` for the full TMT loss, or `ce_only` for next-token cross entropy. |
+| `training.resume` | `true` for resume, or `false` for a fresh run. |
+| `monitoring.log_every` | Update interval for progress output and loss rows. |
+| `monitoring.save_every` | Checkpoint save interval in updates. |
+| `monitoring.sample` | Sample `every`, `prompt`, `seed`, and `bytes`, or `null` when sampling is disabled. |
+| `monitoring.evaluation` | Evaluation interval `every`, or `null` when interval evaluation is disabled. |
+| `progress.completed_updates` | Completed updates in this invocation at the last checkpoint save, or at exit after success, failure, or interrupt. |
+| `progress.initial_optimizer_step` | Saved optimizer step at resume start, or zero for a fresh run. |
+| `progress.optimizer_step` | Total optimizer step at the last manifest write. After resume, it includes earlier updates. |
+| `run.started_at` | Invocation start time in UTC. |
+| `run.status` | `running`, `complete`, `interrupted`, or `failed`. |
+| `run.last_checkpoint` | Absolute path of the last successful checkpoint, or `null` before a fresh run saves. |
+| `run.error` | Error `type` and `message`, or `null`. An interrupt does not set it. |
+
+The file list records selection and pass order. The update budget can stop a pass before the trainer reads every file. Paths do not prove that file contents stay the same. The completed update count includes work after the last checkpoint. It does not imply that the trainer saved all completed updates.
+
+The command writes the manifest at start, after each checkpoint save, and at exit. It writes progress loss rows to `manifest/loss.jsonl` beside the checkpoint.
+Each line is a JSON object with `completed_updates`, `optimizer_step`, and `objective`.
+`loss` is the scalar from the latest update. `mean_loss` is the mean loss over the interval.
+
+`mean_loss_components` contains interval means for `cross_entropy`, `latent_prediction`, and `variance`.
+The row also contains `interval_updates`, `elapsed_seconds`, and `updates_per_second`.
+`elapsed_seconds` counts time from the start of the train loop.
+`updates_per_second` uses time since the last report, with time for reports, samples, and evaluation from that interval.
+
+The command writes a row at each `--log-every` interval. After at least one update, it writes a final row at exit.
+It writes the row only if the last update was outside the interval.
+This also applies after failure or interrupt. The command does not duplicate an interval row when the run ends on that interval.
+
+A fresh run starts an empty `loss.jsonl`. A resume appends its rows to the rows of earlier invocations. Use `optimizer_step` to order rows across invocations.
+
+The checkpoint contains model and optimizer tensors. The loader checks metadata, tensor names, shapes, and types before restore.
+
+At fresh-run start, `run.last_checkpoint` is null. Resume starts with the input checkpoint path.
+Before it writes its own `run.json`, it renames the earlier file to `run.replaced-<UTC timestamp>.json` in the same folder.
+The timestamp marks resume start. It also names the `samples/` folder for that invocation.
+
+Each successful save sets `run.last_checkpoint` to the absolute path.
+Resume adds the requested optimizer updates and starts a new data pass.
+It does not restore a data cursor or random-number state.
+
+The command prints the run folder, seed, config, and successful checkpoint saves.
+Each save line and the final line show `updates`, the completed updates in this invocation, and `step`, the total optimizer step. After a resume, `step` includes the updates before the resume.
+At each progress interval, it prints completed updates, total optimizer step, objective, mean loss, latest loss, and update speed.
+It always prints the final loss.
+
+It saves after each `--save-every` interval and at the end. Ctrl-C requests a stop after the active update and its post-update actions. The trainer saves a checkpoint and records status `interrupted`. The CLI then prints `tmt: interrupted` without a traceback and exits through SIGINT. A shell reports exit status `130`. SIGTERM, for example from `kill` or a job scheduler, has the same effect, and the command also exits through SIGINT with status `130`.
+
+An update failure preserves the last successful checkpoint.
+
+Checkpoint saves use a temporary file in the checkpoint directory. A successful save atomically replaces the destination and preserves its file permissions. A failed write preserves the previous checkpoint.
+
+When `--sample-every` is set, the command samples from frozen weights at each interval.
+It preserves block state, temporal traces, and global random state for the train run.
+It uses `--sample-prompt`, `--sample-seed`, and `--sample-bytes` for each sample.
+The command prints an escaped preview and writes raw bytes to `samples/<UTC timestamp>/step-NNNNNNNNNNNN.bin`.
+The command uses the same sample seed for each sample.
+
+It writes one JSON object per sample to `manifest/samples.jsonl`.
+Each row has `completed_updates`, `optimizer_step`, `prompt`, `seed`, `bytes`, and `path`.
+A fresh run starts an empty index, even when sample output is off. A resume appends to it.
+The command keeps old sample files.
+
+When `--eval-data` and `--eval-every` are set, the command scores held-out files at each update interval.
+It also scores the model after a successful run if the final update is outside an interval.
+The scorer uses frozen weights and restores block state and temporal traces.
+It writes one JSON object per score to `manifest/evaluation.jsonl`.
+Each row has `completed_updates`, `optimizer_step`, and the normal evaluation fields: `input_bytes`, `targets`, `scored_bytes`, `bpb`, `common_targets`, `common_scored_bytes`, `common_bpb`, and `windows`. Interval evaluation requests no context windows, so `windows` is empty and the common fields are zero or `null`.
+
+A fresh run starts an empty `evaluation.jsonl`, even when interval evaluation is off. A resume appends to it.
+
+## sweep
+
+Run each combination in a JSON grid in sequence, then score each trained model on development bytes.
+
+### Syntax
+```text
+tmt sweep --grid PATH --data GLOB --development GLOB --output DIR --seed N [--config PATH] [--updates N] [--log-every N] [--save-every N] [--ce-only] [--max-bytes N] [--sample-every N] [--sample-prompt TEXT] [--sample-seed N] [--sample-bytes N] [--eval-data GLOB --eval-every N] [--eval-max-bytes N]
+```
+
+### Requirements and options
+
+- `--grid PATH` is required. The JSON root must be an object. Each flat model field or `seed` must map to a nonempty array of values. The grid cannot set `tokenizer`. The CLI checks the grid before it creates the output folder.
+- `--data GLOB` is required and selects raw-byte train files. Quote the glob.
+- `--development GLOB` is required and selects raw-byte score files. Quote the glob.
+- `--output DIR` is required. The folder must be new or empty. The command rejects a nonempty folder without changes.
+- `--config PATH` selects the base model JSON. The default is `model.json` in the current folder.
+- `--updates N` sets target-token updates per candidate. The default is `1000`. Use a positive value.
+- `--log-every N` sets the progress interval in updates for each candidate. The default is `100`. Use a positive value.
+- `--save-every N` sets the checkpoint save interval in updates for each candidate. The default is `500`. Use a positive value.
+- `--seed N` sets the base seed when the grid has no `seed` field. This option is required even when the grid has a `seed` field.
+- `--ce-only` selects next-token cross entropy. The default objective is full TMT.
+- `--max-bytes N` limits development input to a global prefix across sorted files. The default is `8192` bytes. Use a positive value. Zero and negative values cause an input error.
+- `--sample-every N` writes a sample after each N completed updates for each candidate. The command writes no samples by default. Use a positive value.
+- `--sample-prompt TEXT` sets the nonempty sample prompt. The default is `The `.
+- `--sample-seed N` sets the sample seed. The default is `11`.
+- `--sample-bytes N` sets the maximum number of output bytes. Stop token 256 can end the sample earlier. The default is `256`. Use a positive value.
+- `--eval-data GLOB` selects held-out files for interval evaluation. Quote the glob.
+- `--eval-every N` sets the evaluation interval in updates. Use a positive value. Set this option with `--eval-data`.
+- `--eval-max-bytes N` sets the global input-byte budget for each evaluation. The default is `8192` bytes. Use a positive value.
+- A sweep needs MLX, the grid and data files, and the base config file.
+
+### Workflow
+
+1. Run `tmt init` and edit `model.json`.
+2. Edit `grid.json` to list values for the fields to compare.
+3. Put train and development files in separate folders.
+4. Read `results.jsonl` and compare each candidate's development BPB.
+
+```bash
+tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --output runs/sweep --updates 1000 --seed 11
+```
+
+### Behavior and files
+The CLI visits value combinations in the key and value order from the JSON file. It trains one candidate at a time. A grid `seed` value selects that candidate's seed. Other grid values replace fields in the base model config. Each candidate uses a `run-NNNN/` folder under `DIR`. The folder contains `model.safetensors` and a `manifest/` folder.
+
+Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same groups as a standalone train invocation. Its loss rows are in `run-NNNN/manifest/loss.jsonl`. Sample and interval-evaluation files also stay in each candidate folder. The command appends one grouped JSON result per candidate to `results.jsonl`.
+
+| Field path | Meaning |
+| --- | --- |
+| `model` | Candidate `block`, `dimensions`, `trainable_parameters`, `temporal_gradient`, and optional `extensions`. |
+| `hparams` | Candidate `optimizer` and `sampling` settings. |
+| `data.train.glob` | Train glob as supplied. |
+| `data.development` | Development `glob` and `max_bytes`. |
+| `training.seed` | Seed for this candidate. |
+| `training.updates` | Requested target-token update count. |
+| `training.objective` | `tmt` or `ce_only`. |
+| `evaluation.targets` | Development target count. |
+| `evaluation.bpb` | Development bits per byte. |
+| `run.index` | Candidate number. |
+| `run.checkpoint` | Absolute path to the candidate checkpoint. |
+
+The top-level `sweep.json` uses the same groups and adds `grid`.
+
+| Field path | Meaning |
+| --- | --- |
+| `model` | Base `block`, `dimensions`, and optional `extensions`. `trainable_parameters` and `temporal_gradient` are `null`. |
+| `hparams` | Base `optimizer` and `sampling` settings. |
+| `grid` | Flat axes that define candidate values. |
+| `data.train` | Train `glob` and matched absolute `files`. |
+| `data.development` | Development `glob`, matched absolute `files`, and `max_bytes`. |
+| `data.evaluation` | Optional interval-evaluation `glob`, matched absolute `files`, and `max_bytes`. |
+| `training` | Base `seed`, `updates`, `objective`, and `resume` values. |
+| `monitoring` | Log and save intervals, sample options, and evaluation interval. |
+| `progress` | `completed_runs` and `current_run` values. |
+| `run` | `started_at`, `status`, and `error` values. |
+
+The package registers only `tmt-v0`. To compare it with a custom block, add a factory to `src/tmt/blocks.py` first.
+Then add the block names and paired seeds to the grid. Keep the base config, data, objective, optimizer settings, and update budget fixed.
+
+```json
+{
+  "block": ["tmt-v0", "candidate-v1"],
+  "seed": [11, 22, 33]
+}
+```
+
+```bash
+tmt sweep --config research.json --grid ab-grid.json \
+  --data 'data/train/*' --development 'data/dev/*' \
+  --output runs/ab-001 --updates 1000 --seed 11
+```
+
+Pair result rows by seed and compare every score. A shared seed repeats the RNG start.
+It does not guarantee equal initial values for differently shaped blocks.
+Equal updates do not mean equal parameter count, compute, or state memory.
+Record the source revision and fixed factory choices with the results.
+
+Interval evaluation uses `--eval-data` and `--eval-every`. It is separate from the development score at the end of each candidate. The development score still selects the best candidate.
+
+At the end, the command prints the row with the lowest development BPB. The first candidate wins a tie. The command does not write a separate best-model file.
+
+Use a new or empty output folder for each sweep. The command rejects a nonempty folder to preserve checkpoints and result rows.
+
+The command checks train, evaluation, and development selections before output creation. The evaluation and development selections must each contain at least one document with two or more bytes. An input error leaves no new output folder. Correct the input and retry with the same output path.
+
+After execution starts, `sweep.json` records settings in the groups above.
+The command writes `sweep.json` at start, after each candidate result, and at exit. `progress.current_run` is `null` at start and then holds the latest candidate number. `progress.completed_runs` counts the result rows.
+It records the final state in `run.status` and `run.error`. Unlike `train`, an interrupt sets `run.error`, with type `KeyboardInterrupt`.
+Completed rows remain in `results.jsonl`. Ctrl-C or SIGTERM stops the active run as in `train`.
+The command then prints `tmt: interrupted` and exits through SIGINT.
+
+To retry after an execution failure, use a new output path. The command does not resume a partial sweep.
+
+## evaluate
+
+Measure next-token prediction on raw-byte documents with frozen model weights.
+
+### Syntax
+```text
+tmt evaluate CHECKPOINT --data GLOB [--max-bytes N] [--windows N [N ...]] [--output PATH]
+```
+
+### Requirements and options
+
+- `CHECKPOINT` is required. It must contain valid model and optimizer tensors.
+- `--data GLOB` is required. Quote the glob so the CLI expands it.
+- `--max-bytes N` sets the global input-byte limit across sorted files. The default is `8192` bytes. Use a positive value. Zero and negative values cause an input error.
+- `--windows N [N ...]` selects context lengths in input bytes. The default is no context-window scores. Every value must be positive.
+- `--output PATH` writes the score object as JSON. Without this option, scores go to the terminal.
+- Evaluation needs MLX and at least one file that matches `GLOB`. At least one document in the selected input prefix must contain two tokens. The command checks the byte input before it loads the checkpoint and checks BPE token targets after load.
+- Documents with fewer than two tokens provide no evaluation targets.
+
+### Workflow
+
+1. Select a checkpoint from a completed train or sweep run.
+2. Put held-out raw-byte files in a separate folder.
+3. Run evaluation with a quoted file glob.
+4. Add `--windows` to compare limited context lengths.
+
+```bash
+tmt evaluate runs/first/model.safetensors --data 'data/dev/*' --windows 8 32 128 --output runs/first/evaluation.json
+```
+
+### Behavior and files
+The command reads a global prefix from sorted files and keeps each file as a separate document. The first token provides context for the next-token score. The scorer consumes the final input token without a target score. The full score uses all earlier tokens to predict the next token. A window score uses only its selected context length. The report includes input bytes, target count, full BPB, common-target count, common BPB, and each requested window score.
+
+Scores also report `scored_bytes` and `common_scored_bytes`, the bytes of the full and common target tokens. In byte mode, these values equal `targets` and `common_targets`. BPB divides target negative log likelihood in bits by the bytes of the target tokens. A BPE window encodes the raw-byte suffix again, so its tokens can differ from full-document tokens. Common scores use target byte offsets at or above the largest requested window. If no common targets remain, common BPB and window deltas are null. The scorer snapshots and restores block state and temporal traces after success or error. It does not update weights or draw random samples. The optional JSON file contains the printed score values, then `checkpoint`, the checkpoint path as given, and `optimizer_step`, its total optimizer step. The command does not alter the checkpoint.
+
+## benchmark
+
+Run the fixed byte benchmark suite. Optionally train a small CoLA classification head and report its score.
+
+### Syntax
+```text
+tmt benchmark CHECKPOINT --seed N [--cola-data PATH] [--epochs N] [--split FRACTION] [--output PATH]
+python -m tmt.benchmark CHECKPOINT --seed N [--cola-data PATH] [--epochs N] [--split FRACTION] [--output PATH]
+```
+
+The module command uses the same CLI as `tmt benchmark`. Both commands return this section for `--help` without MLX.
+
+### Requirements and options
+
+- `CHECKPOINT` is required and must pass strict model and optimizer tensor checks.
+- `--cola-data PATH` selects a local four-column CoLA TSV. Labels must be `0` or `1`. Each nonblank row must have exactly four columns and a sentence with at least one non-whitespace character. The command rejects an invalid row with its TSV row number before model load or byte evaluation. Without this option, the command runs only the byte suite.
+- `--epochs N` sets CoLA head epochs. The default is `1`. When you set `--cola-data`, the value must be a positive integer. Epoch count does not change the fixed byte suite.
+- `--split FRACTION` sets the contiguous CoLA train fraction. The default is `0.5`. Use a value from `0` to `1`, inclusive. The command checks this value before it loads the checkpoint.
+- `--seed N` sets the CoLA head seed. This option is required.
+- `--output PATH` writes the result object as JSON. Its parent folder must exist. The command checks the folder before it loads the checkpoint. Without this option, results go to the terminal only.
+- The benchmark needs MLX. CoLA needs a readable TSV with at least two valid rows. A TSV with fewer valid rows is an input error. The command does not download data.
+
+### Workflow
+
+1. Select a checkpoint from a train or sweep run.
+2. Run the fixed byte suite.
+3. To include CoLA, supply a local four-column TSV.
+4. Set `--seed` for every benchmark. Set `--epochs` or `--split` when needed.
+
+```bash
+tmt benchmark runs/first/model.safetensors --seed 11
+tmt benchmark runs/first/model.safetensors --cola-data data/cola.tsv --epochs 1 --split 0.5 --seed 11
+```
+
+### Behavior and files
+The fixed suite uses 393 input bytes in three documents and context windows of 1, 8, 32, and 128 bytes. In byte mode it reports 390 full-history targets and 104 common targets. BPE target counts depend on its merges. The common count uses the suffix shared by all windows. For CoLA, the loader reads the sentence from column four and the label from column two. It keeps the input row order. The fixed suite does not establish general model quality.
+
+The loader ignores blank lines and preserves sentence whitespace. TSV row numbers include blank lines.
+
+The split is contiguous. The model weights stay frozen, and only a separate linear classification head receives updates. The command reports train and held-out confusion counts with MCC multiplied by 100. The score range is -100 to 100.
+
+TMT-v0 uses recurrent-state features. Other blocks use final-output features by default.
+The benchmark reports the JSON key `feature_source` as `recurrent-state` or `final-output` with the CoLA scores.
+The `epoch_scores` key contains the CoLA scores for each epoch. Without CoLA, this list is empty.
+
+The benchmark prints results to the terminal. With `--output`, it also writes `byte_scores`, optional `feature_source` for CoLA, and `epoch_scores`.
+The result then adds `checkpoint`, the path as given, `optimizer_step`, its total update count, and `seed`.
+Objective loss is not part of the result. The command does not save a checkpoint.
+A missing supplied TSV raises a file error.
+
+## generate
+
+Use a UTF-8 text prompt to produce up to a selected number of raw output bytes from a frozen checkpoint.
+
+### Syntax
+```text
+tmt generate CHECKPOINT --prompt TEXT --output PATH --seed N [--bytes N] [--log-every N] [--temperature VALUE]
+```
+
+### Requirements and options
+
+- `CHECKPOINT` is required and must pass strict model and optimizer tensor checks.
+- `--prompt TEXT` is required and must not be empty. The command encodes it as UTF-8.
+- `--output PATH` is required. Its parent folder must exist and allow writes. The command checks that the folder exists before it loads the checkpoint.
+- `--seed N` sets the sample seed. This option is required.
+- `--bytes N` sets the maximum output byte count. The default is `512`. Zero writes an empty file. Negative values are invalid.
+- `--log-every N` sets the output progress interval in bytes. The default is `1000`. Use a positive value.
+- `--temperature VALUE` overrides the checkpoint value. The override must be finite and nonnegative. The default uses the checkpoint value.
+- Generation needs MLX. The output byte count can be zero or positive.
+
+### Workflow
+
+1. Select a checkpoint.
+2. Choose a nonempty text prompt. Set `--bytes 0` to create an empty output file.
+3. Choose an output path outside files that you need to keep.
+4. Read the output as bytes. It does not include the prompt.
+
+```bash
+tmt generate runs/first/model.safetensors --prompt "The key is" --output runs/first/generated.bin --bytes 64 --seed 11
+```
+
+### Behavior and files
+The command encodes the UTF-8 prompt and replays it through the model, then samples tokens until stop token 256 or the byte limit. Stop writes no bytes. A BPE token that crosses the byte limit is truncated. The model weights stay frozen. The command prints the generated byte count at each progress interval and at completion. It writes only generated bytes to `PATH`. A zero byte count creates an empty file. The output file replaces a file that already exists at that path. The command does not create its parent folder. Output bytes can be invalid UTF-8.
+
+A temperature of zero still samples. The sampler scales `temp` by the entropy of each prediction and uses a minimum of `0.1`. The model configuration section gives the formula.
+
+## inspect
+
+Show the optimizer step, parameter count, and settings of a checkpoint, and the status of its run.
+
+### Syntax
+```text
+tmt inspect CHECKPOINT
+```
+
+### Requirements and options
+
+- `CHECKPOINT` is required and must pass strict model and optimizer tensor checks.
+- Inspection needs MLX. It does not need data, a seed, or a config file.
+
+### Workflow
+
+1. Select a checkpoint from a train or sweep run.
+2. Run `tmt inspect` to read its total optimizer step before a resume, an evaluation, or a benchmark.
+3. Read the run line to see whether the run completed, failed, or was interrupted.
+
+```bash
+tmt inspect runs/first/model.safetensors
+```
+
+### Behavior and files
+The command loads the checkpoint and prints three lines. The first line shows the checkpoint path, `step`, the total optimizer step, and the count of trainable tensor elements. The second line shows the flat checkpoint settings as JSON. The third line shows `status`, `objective`, `seed`, and `completed_updates` (as `updates`) from `manifest/run.json` beside the checkpoint. Without that file, the third line is `run manifest: none`.
+
+The manifest is the record of the latest invocation that used that folder. During an active run, it shows the state at the last checkpoint save. Before the first save, it shows the state at run start.
+Inspection requires the grouped `run`, `training`, and `progress` objects.
+If any group is missing or is not an object, Python inspection raises `ValueError` with this message:
+
+```text
+run manifest must contain grouped run, training, and progress objects
+```
+
+This check rejects flat run manifests. No automatic migration is provided.
+The command does not change the checkpoint or the manifest, and it does not change the caller's RNG state.
+
+## help
+
+Read the bundled manual or one command section. These requests run before command argument checks and experiment work.
+
+### Syntax
+```text
+tmt help [COMMAND]
+tmt help --help
+tmt --help COMMAND
+tmt -h COMMAND
+tmt COMMAND --help
+tmt COMMAND -h
+tmt --help
+tmt -h
+tmt --version
+```
+
+### Requirements and options
+
+- `COMMAND` is optional after `tmt help`. It can be `init`, `tokenizer-convert`, `train`, `sweep`, `evaluate`, `benchmark`, `generate`, `inspect`, or `help`.
+- `-h` and `--help` select the same manual section in the listed positions.
+- Bare `tmt --help` and `tmt -h` print a short command index.
+- `tmt --version` prints the installed package version and commit information.
+- Manual and version requests need no MLX, config, data, or checkpoint. They create no files.
+
+### Workflow
+
+1. Run `tmt --help` to view the command index.
+2. Name a command to read its full section.
+3. Use the syntax and workflow in that section to run an experiment.
+
+```bash
+tmt help init
+tmt help help
+tmt --help train
+tmt generate --help
+tmt --version
+```
+
+### Behavior and limits
+`tmt help` prints the complete bundled manual. `tmt help COMMAND` prints one section. `tmt help --help` prints the help section. The `--help` and `-h` forms print the same section. A help request after other command arguments prints the manual before the CLI checks those arguments or starts an experiment. When the first argument is another option, such as `--version`, the parser handles the request in argument order. For example, `tmt --version --help` prints the version, and `tmt --help --version` prints the short command index. These requests do not print a manual section. A command option before the command name, such as `tmt --seed 1 train`, gives a parser error that names the commands that accept that option.
+
+An unknown help topic gives a short parser error and exit code `2`. A manual request does not need a valid file path. The version command reads installed distribution metadata from `test-model-thing`.
+
+It prints `vcs_info.commit_id` from `direct_url.json` when present. Otherwise it prints `commit unknown`. The version command does not inspect the current folder or run Git. Local and wheel installs normally report `commit unknown`. There is no `version` subcommand.

@@ -23,7 +23,7 @@ Feel free to fork the training and benchmark code (everything is under MIT). I r
 
 For reproduction purposes, the dataset I trained my model on is ```simplewiki-20260801-pages-articles.xml.bz2```, from the Wikipedia dumps. The 4.5m model has ```dim = 512``` and ```layers = 16```.
 
-Below is ```--frozen``` mode output after training a model for 5 minutes (you could train it for much longer, feel free to send in the results as a GitHub issue).
+Below is ```tmt generate``` output after training a model for 5 minutes (you could train it for much longer, feel free to send in the results as a GitHub issue).
 
 <img width="1127" height="634" alt="Screenshot 2026-09-19 at 4 53 44 PM" src="https://github.com/user-attachments/assets/ca1553de-0248-4f6d-a67d-2f6e30938d9e" />
 
@@ -32,38 +32,47 @@ Also below is some results from CoLA after training a model for ~30 minutes. GPT
 <img width="449" height="273" alt="Screenshot 2026-09-19 at 4 53 25 PM" src="https://github.com/user-attachments/assets/66cd054d-61c0-442a-a0bd-24352dac3f58" />
 
 
-## Training your own model
+## Install and train a model
 
-Model weights (in ```.safetensors```) are not provided because GitHub doesn't like very large files. But, you can train your own model simply by initializing a ```venv``` and installing dependencies with ```pip install mlx``` on Mac or ```pip install mlx[cuda]``` on Linux with GPU or ```pip install mlx[cpu]``` on Linux with CPU. Then run ```main.py```.
+Use Python 3.12, 3.13, or 3.14 and a functional MLX runtime.
+From the checkout, create a virtual environment and install the CLI:
 
 ```bash
-python main.py <path> train
-python main.py <path> chat
-
-# only use crossentropy loss
-python main.py <path> chat --ce-only
-
-# does not save to disk
-python main.py <path> chat --no-save
-
-# does not modify weights
-python main.py <path> chat --frozen
-
-# does not save to disk or modify weights
-python main.py <path> chat --no-save --frozen
-
-# benchmark with CoLA
-python benchmark.py <path> <epochs> <slice>
+# Use python3.12, python3.13, or python3.14.
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+tmt --version
 ```
 
-You will have to configure your own dataset to run dataset mode, but you should be able to run chat mode without modifying anything if you have weights already.
+Activation adds `.venv/bin` to PATH for this terminal.
+Developers can use `python -m pip install -e '.[test]'` so source edits take effect directly and pytest is available.
+`python -m tmt` also runs the CLI.
+The version uses installed package metadata.
 
-Once it begins training, you can safely ^C the program and it will save weights. It will also periodically save weights every so often. The saved weights include the internal memory so the model will remember that the next time it runs. You can launch into chat mode and the memory should carry on from whatever it was learning in training.
+Create a workspace in any folder, then supply raw-byte files:
 
-## A graphical view (partially outdated)
+```bash
+mkdir my-workspace
+cd my-workspace
+tmt init
+# Select a tiny model for this example.
+printf '{"model":{"dimensions":{"dim":4,"layers":1,"spread":4}}}\n' > model.json
+printf abcd > data/train/tiny.bin
+tmt train --data 'data/train/*' --run first --updates 3 --seed 11
+tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 2 --seed 11
+tmt evaluate runs/first/model.safetensors --data 'data/train/*' --windows 1 2
+tmt generate runs/first/model.safetensors --prompt 'The ' --output sample.bin --bytes 4 --seed 11
+tmt benchmark runs/first/model.safetensors --seed 11
+```
 
-_I'm probably going to redo this in Manim or similar software sometime soon. Expect this part to change significantly soon_
+Fresh train and sweep commands use `model.json` in the current folder by default.
+`--config PATH` selects another model JSON for a fresh run.
 
-Below is an approximate flow chart of the model architecture, made in Apple's Freeform app (excluding the wrapper for dataset cleaning and input/output handling) for reference. Note that the arrow connecting the target latent to the CE loss should instead be the target byte to the CE loss.
+Resume uses checkpoint settings and adds updates with a new data pass. It does not restore the file cursor or RNG state.
 
-<img width="1653" height="1161" alt="JEPA thing" src="https://github.com/user-attachments/assets/2d3a34ff-ba6a-44b8-b361-6c73da9216c0" />
+The trainer saves every 500 updates by default (set this with `--save-every`) and at normal completion. Ctrl-C or SIGTERM requests a stop after the active update and its post-update actions. The trainer then saves a checkpoint.
+
+Read the [command manual](src/tmt/commands.md) or use `tmt help`.
+Use [train](src/tmt/commands.md#train) for run and resume options.
+The tiny example checks commands. It does not establish model quality.

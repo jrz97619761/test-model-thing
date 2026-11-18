@@ -1,0 +1,22 @@
+{
+  "model": {
+    "block": "tmt-v0",
+    "dimensions": {
+      "dim": 4,
+      "layers": 1,
+      "spread": 4
+    }
+  },
+  "hparams": {
+    "optimizer": {
+      "rate": 0.0005,
+      "bound": [
+        40000,
+        120000
+      ]
+    },
+    "sampling": {
+      "temp": 0.75
+    }
+  }
+}
