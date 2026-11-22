@@ -1,3 +1,3 @@
-from .cli import console_main
+from tmt.cli.cli import main
 
-raise SystemExit(console_main())
+raise SystemExit(main())

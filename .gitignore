@@ -1,16 +1,22 @@
-/.venv/
+# cache
 /typings/
+/build/
+/dist/
+/.venv/
+*.whl
+*.egg-info
+.pytest_cache/
+__pycache__/
+
+# dataset
 /wikipedia_clean/
 /CoLA/
 *.xml.bz2
-__pycache__/
-*.pipe
+
+# macOS
 *.DS_Store
+
+# runs
 *.safetensors
 /runs/
 /data/
-
-/build/
-/dist/
-*.whl
-*.egg-info
