@@ -214,7 +214,8 @@ BENCHMARK: Arguments = {
         'help': 'JSON result file'
     },
 
-    'cola_data': {
+    '--cola-data': {
+        'default': 'data/cola/dev.tsv',
         'help': 'four-column CoLA TSV path'
     },
     
