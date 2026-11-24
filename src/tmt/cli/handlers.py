@@ -83,6 +83,8 @@ def handle_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> N
     if args.run is not None: validation.file_name(args.run)
     validation.require(glob.glob(args.data, recursive = True), f'no files matched {args.data!r}')
 
+    validation.positive(args.max_bytes, 'max bytes')
+
     # config loading
 
     config = tokenizer = None
@@ -122,6 +124,8 @@ def handle_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> N
     ).run()
 
 def handle_evaluate(args: argparse.Namespace, _: argparse.ArgumentParser) -> None:
+    validation.positive(args.max_bytes, 'max bytes')
+
     checkpoint.write_json(args.output, benchmark.bpb_score(
         checkpoint.load(args.checkpoint)[0],
         list(checkpoint.ByteFiles.load(args.data, args.max_bytes)),
@@ -149,6 +153,8 @@ def handle_generate(args: argparse.Namespace, _: argparse.ArgumentParser) -> Non
         file.write(generated)
 
 def handle_sweep(args: argparse.Namespace, _: argparse.ArgumentParser) -> None:
+    validation.positive(args.max_bytes, 'max bytes')
+    
     runtime.sweep(
         args.data, args.eval_data, args.dev_data, args.grid, args.config, args.output,
         args.seed, args.updates,
@@ -160,15 +166,3 @@ def handle_sweep(args: argparse.Namespace, _: argparse.ArgumentParser) -> None:
 def handle_inspect(args: argparse.Namespace, _: argparse.ArgumentParser) -> None:
     summary = runtime.inspect(args.checkpoint)
     print(json.dumps(summary))
-
-HANDLERS: dict[str, commands.Handler] = {
-    'init': handle_init,
-    'tokenizer-convert': handle_tokenizer_convert,
-    'train': handle_train,
-    'evaluate': handle_evaluate,
-    'benchmark': handle_benchmark,
-    'generate': handle_generate,
-    'sweep': handle_sweep,
-    'inspect': handle_inspect,
-    'help': commands.nothing
-}

@@ -24,4 +24,4 @@ tmt = "tmt.cli.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-tmt = ["COMMANDS.md"]
+tmt = ["commands.md"]

@@ -25,7 +25,7 @@ def version() -> str:
 
 def manual(topic: str | None = None) -> str:
     from importlib.resources import files
-    manual = files('tmt').joinpath('COMMANDS.md').read_text(encoding = 'utf-8')
+    manual = files('tmt').joinpath('commands.md').read_text(encoding = 'utf-8')
 
     if topic is None: return manual
     if topic not in tuple(cmd.name for cmd in commands.COMMANDS): raise ValueError(f'unknown help topic: {topic}')
@@ -82,6 +82,18 @@ def check_misplaced(argv: Sequence[str], parser: argparse.ArgumentParser) -> Non
 
 # final setup
 
+HANDLERS: dict[str, commands.Handler] = {
+    'init': handlers.handle_init,
+    'tokenizer-convert': handlers.handle_tokenizer_convert,
+    'train': handlers.handle_train,
+    'evaluate': handlers.handle_evaluate,
+    'benchmark': handlers.handle_benchmark,
+    'generate': handlers.handle_generate,
+    'sweep': handlers.handle_sweep,
+    'inspect': handlers.handle_inspect,
+    'help': lambda *_: print(manual(), end = '')
+}
+
 def setup() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(**commands.METADATA)
     parser.add_argument('--version', action = 'version', version = version())
@@ -91,13 +103,11 @@ def setup() -> argparse.ArgumentParser:
     train_base = argparse.ArgumentParser(add_help = False)
     commands.argument(train_base, commands.TRAIN_BASE)
 
-    handlers.HANDLERS['help'] = lambda *_: print(manual(), end = '')
-
     for cmd in commands.COMMANDS:
         commands.register(
             subparser, cmd,
             [train_base] if cmd.name in SHARED else [],
-            handlers.HANDLERS[cmd.name]
+            HANDLERS[cmd.name]
         )
 
     return parser
@@ -105,7 +115,7 @@ def setup() -> argparse.ArgumentParser:
 SILENT = ('help', 'inspect', '--version')
 
 def log_notice(argv: Sequence[str], type: str) -> None:
-    if len(argv) > 0 and argv[0] not in SILENT: print(f'tmt: {type} command \'{argv[0]}\'.')
+    if len(argv) > 0 and argv[0] not in SILENT: print(f'tmt: {type} command \'{argv[0]}\'.', file = sys.stderr)
 
 @commands.wrap_interrupt
 def main(argv: Sequence[str] | None = None) -> None:

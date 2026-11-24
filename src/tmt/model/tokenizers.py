@@ -75,12 +75,12 @@ class BPEConverter:
     @staticmethod
     def huggingface(config: Any) -> list[BytePair]:
         validation.instance(config, dict, 'hf tokenizer')
-        validation.key_difference(config, ['model'], 'hf tokenizer')
+        validation.key_difference(config, ['model'], 'hf tokenizer', strict = False)
 
         validation.instance(config.get('model'), dict, 'hf tokenizer model')
         validation.instance(config['model'].get('merges'), list, 'hf tokenizer merges list')
         validation.require(
-            config['model'].get('type') == 'BPE', f'hf tokenizer must be of type BPE, currently type \'{config['model'].get(type)}\''
+            config['model'].get('type') == 'BPE', f'hf tokenizer must be of type BPE, currently type \'{config['model'].get('type')}\''
         )
 
         visible = [*range(33, 127), *range(161, 173), *range(174, 256)]

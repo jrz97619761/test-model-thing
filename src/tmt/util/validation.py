@@ -65,8 +65,8 @@ def finite(value: Any, name: str) -> None:
     require(math.isfinite(value), f'number \'{name}\' should be finite')
 
 def seed(value: Any, name: str = 'seed') -> None:
-    number(value)
-    require(0 <= value <= 2 ** 64, f'number \'{name}\' should be between 0 and {2 ** 64 - 1} (aka 2 ** 64 - 1)')
+    instance(value, int, name)
+    require(0 <= value < 2 ** 64, f'number \'{name}\' should be between 0 and {2 ** 64 - 1} (aka 2 ** 64 - 1)')
 
 # lists and dicts
 

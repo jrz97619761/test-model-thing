@@ -109,6 +109,8 @@ class Model(nn.Module):
 
     def restore(self, snapshot: list[blocks.Fields]):
         validation.iterable_length(snapshot, self.blocks, 'model snapshot')
+
+        for block, fields in zip(self.blocks, snapshot): block.validate(block.fields(), fields)
         for block, fields in zip(self.blocks, snapshot): block.restore(fields)
 
     # train and inference

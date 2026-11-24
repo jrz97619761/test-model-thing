@@ -119,7 +119,7 @@ def validate_headers(path: validation.FilePath) -> blocks.Config:
     validation.instance(raw_config.get('model'), dict, 'checkpoint model config')
 
     validation.instance(raw_config.get('version'), int, 'checkpoint version')
-    validation.require(raw_config.get('version') == 1, 'checkpoint version is not 1')
+    validation.require(raw_config.get('version') == 2, 'checkpoint version is not 2')
 
     return {
         key: tuple(value) if isinstance(value, list) else value
@@ -172,7 +172,7 @@ def ungroup_config(config: dict[str, Any]) -> blocks.Config:
         config['hparams']['opt']['lower'], config['hparams']['opt']['upper'], config['hparams']['opt']['rate']
     )
 
-    for key in config['custom']:
+    for key in config.get('custom', {}):
         validation.require(key not in flattened, 'custom model config attempts to override base config option')
 
         value = config['custom'][key]
@@ -210,7 +210,7 @@ def save(path: validation.FilePath, m: model.Model, config: blocks.Config):
     import mlx.core as mx
 
     validate_config(config)
-    meta = json.dumps({'version': 1, 'model': config})
+    meta = json.dumps({'version': 2, 'model': config})
 
     m.optimizer.opt.init(m.trainable_parameters())
     parameters = flatten(m.parameters(), 'm')

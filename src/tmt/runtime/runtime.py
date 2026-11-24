@@ -49,12 +49,13 @@ def sample(model: model.Model, prompt: str, steps: int, seed: int):
 def generate(model: model.Model, prompt: str, steps: int, seed: int, temp: float = -1.0):
     validation.seed(seed)
     validation.finite(temp, 'temperature')
+    validation.positive(temp, 'temperature', strict = False)
 
     validation.require(prompt, 'prompt cannot be empty')
     validation.require(steps >= 0, 'cannot have negative generation length')
 
     model.reset()
-    if temp > 0.0: model.config['temp'] = temp
+    if temp >= 0.0: model.config['temp'] = temp
 
     generated = bytearray()
     with checkpoint.preserve_seed():
@@ -167,7 +168,7 @@ class TrainingRun:
             checkpoint.validate_config(config)
 
             with checkpoint.preserve_seed():
-                checkpoint.seed(0)
+                checkpoint.seed(self.seed)
                 self.model = model.Model(config, tokenizer)
                 self.config = config
 
@@ -311,7 +312,7 @@ class TrainingRun:
                 end = (index == len(data) - 1)
                 components: dict[str, float] = {}
 
-                _, (_, loss) = self.model.train_step(
+                loss, (_, _) = self.model.train_step(
                     (data[index], 256 if end else data[index + 1], end),
                     components
                 )
@@ -384,7 +385,7 @@ class TrainingRun:
         except Exception as error:
             self.status = 'failed'
 
-            self.error_type = type(error).__name__,
+            self.error_type = type(error).__name__
             self.error_msg = str(error)
 
             raise
@@ -646,7 +647,7 @@ def sweep(
     except Exception as error:
         status = 'failed'
 
-        error_type = type(error).__name__,
+        error_type = type(error).__name__
         error_msg = str(error)
 
         raise
@@ -659,4 +660,4 @@ def sweep(
             completed, current, start, status, error_type, error_msg
         ))
 
-    return min(rows, key = lambda row: row['eval']['bpb'])
+    return min(rows, key = lambda row: row['eval']['full']['bpb'])

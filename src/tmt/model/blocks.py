@@ -75,7 +75,7 @@ class Block(nn.Module):
 
     def commit(self, states: Fields, traces: Fields) -> None:
         self.validate(self.statefields, states)
-        self.validate(self.tracefields, traces)
+        self.validate(self.tracefields, traces, strict = False)
 
         for field, data in {**states, **traces}.items(): setattr(self, field, mx.stop_gradient(data))
 
@@ -107,8 +107,8 @@ class Block(nn.Module):
 
         return self.schema
 
-    def validate(self, names: FieldNames, fields: Fields):
-        if not fields: return
+    def validate(self, names: FieldNames, fields: Fields, strict: bool = True):
+        if not strict and not fields: return
 
         validation.require(set(names) == set(fields), f'block field names do not match block fields. names: {set(names)}, fields: {set(fields)}')
         if self.schema is None: self.create_schema()

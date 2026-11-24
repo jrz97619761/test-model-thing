@@ -104,7 +104,7 @@ TRAIN_BASE: Arguments = {
     },
     '--eval-data': {
         'default': 'data/eval/**',
-        'help': 'quoted held-out train glob, one document per file'
+        'help': 'quoted held-out train glob, one document per file; required'
     },
 
     '--updates': {
@@ -202,7 +202,7 @@ EVAL: Arguments = {
         'type': int,
         'nargs': '+',
         'default': (),
-        'help': 'context lengths in input bytes; default: (1, 8, 32, 128)'
+        'help': 'context lengths in input bytes; default: ()'
     }
 }
 

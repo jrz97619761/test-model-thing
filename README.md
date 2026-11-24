@@ -87,7 +87,7 @@ tmt generate runs/run/model.safetensors sample.bin "The " --seed 325
 
 tmt evaluate runs/run/model.safetensors eval.json
 
-tmt benchmark runs/run/model.safetensors benchmark.json "data/cola/dev.tsv" --seed 325 --windows 1 2
+tmt benchmark runs/run/model.safetensors benchmark.json --seed 325
 
 tmt sweep grid.json sweep.json --seed 325
 ```
