@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import glob
 import json
 import os
@@ -311,7 +313,7 @@ class ByteFiles:
             yield data
 
     def validate(self, size: int = -1) -> ByteFiles:
-        targets = sum(max(len(document) - 1, 0) for document in self.get(size))
+        targets = sum(max(len(document), 0) for document in self.get(size))
         validation.require(targets, 'byte documents require at least 1 byte pair')
 
         return self

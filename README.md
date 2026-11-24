@@ -43,7 +43,7 @@ _While I personally don't use LLM agents (due to $$$ requirements), LLM contribu
 
 ### TMT module (macOS)
 
-First clone the repo via git. Python 3.13 and 3.14 are supported.
+First clone the repo via git. Python 3.12 to 3.14 are supported.
 
 Then, run the following commands (you should see the version of TMT installed):
 

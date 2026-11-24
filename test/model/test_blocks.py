@@ -1,3 +1,4 @@
+from __future__ import annotations
 import pytest
 
 import mlx.core as mx
@@ -21,8 +22,8 @@ class MatrixCache(Block):
     def tracefields(self) -> FieldNames:
         return ('history', )
 
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
+    def __init__(self, config: Config, aux: Config) -> None:
+        super().__init__(config, aux)
         self.proj = nn.Linear(config['dim'], config['dim'], bias = False)
         
         self.matrix = mx.zeros((config['dim'], config['dim']))
@@ -42,8 +43,8 @@ class MatrixCache(Block):
         return output, {'matrix': matrix, 'cache': cache}, {}
 
 class Unfrozen(MatrixCache):
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
+    def __init__(self, config: Config, aux: Config) -> None:
+        super().__init__(config, aux)
         self.unfreeze(keys = ['cache'], recurse = False)
 
 class Duplicate(MatrixCache):
@@ -52,8 +53,8 @@ class Duplicate(MatrixCache):
         return ('matrix', )
 
 class NoWeights(Block):
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
+    def __init__(self, config: Config, aux: Config) -> None:
+        super().__init__(config, aux)
 
     def __call__(self, inputs: Fields, probe: mx.array) -> FwdOutput:
         return inputs['x'] + mx.tanh(inputs['enc']), {}, {}
@@ -67,7 +68,8 @@ def blocks(monkeypatch):
 
 # tests
 
-BLOCK_OVERRIDES = {'dim': 4, 'spread': 4, 'vocab': 257}
+BLOCK_OVERRIDES = {'dim': 4, 'spread': 4}
+AUX = {'vocab': 257}
 
 @pytest.mark.parametrize(('blocktype', 'expected'), [
     (Block, ((), ())),
@@ -75,7 +77,7 @@ BLOCK_OVERRIDES = {'dim': 4, 'spread': 4, 'vocab': 257}
     (MatrixCache, (('matrix', 'cache'), ('history', ))),
 ], ids = ['base', 'tmt0', 'matrixcache'])
 def test_block_fields(blocktype, expected):
-    block = blocktype(BLOCK_OVERRIDES)
+    block = blocktype(BLOCK_OVERRIDES, AUX)
     fields = ('statefields', 'tracefields')
 
     for field, original in zip(fields, expected):
@@ -90,7 +92,7 @@ def test_block_fields(blocktype, expected):
 
 @pytest.mark.parametrize('operation', ['commit', 'result', 'restore'])
 def test_block_lazy_validation(operation):
-    block = TMT0Block(BLOCK_OVERRIDES)
+    block = TMT0Block(BLOCK_OVERRIDES, AUX)
     assert block.schema is None
 
     def check():

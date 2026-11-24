@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as opt
@@ -7,27 +9,30 @@ import tmt.model.blocks as blocks
 import tmt.model.tokenizers as tokenizers
 import tmt.util.validation as validation
 
+from typing import Any
+
 type ModelInputs = tuple[int, int, bool]
 
 class Encoder(nn.Module):
-    def __init__(self, config: blocks.Config) -> None:
+    def __init__(self, config: blocks.Config, aux: blocks.Config) -> None:
         super().__init__()
-        self.embed = nn.Embedding(config['vocab'], config['dim'])
+        self.embed = nn.Embedding(aux['vocab'], config['dim'])
 
     def __call__(self, x: mx.array) -> mx.array: return self.embed(x)
 
 class Decoder(nn.Module):
-    def __init__(self, config: blocks.Config) -> None:
+    def __init__(self, config: blocks.Config, aux: blocks.Config) -> None:
         super().__init__()
-        self.decode = nn.Linear(config['dim'], config['vocab'])
+        self.decode = nn.Linear(config['dim'], aux['vocab'])
 
     def __call__(self, x: mx.array) -> tuple[mx.array, mx.array]:
         logits = self.decode(x)
         return logits, mx.softmax(logits)[256:257]
 
 class Optimizer:
-    def __init__(self, config: blocks.Config) -> None:
+    def __init__(self, config: blocks.Config, aux: blocks.Config) -> None:
         self.config = config
+        self.aux = aux
 
         self.opt = opt.AdamW(learning_rate = self.lr)
         self.compiled = None
@@ -60,24 +65,24 @@ class Optimizer:
     def evaluate(self, model: Model) -> None: mx.eval(model.parameters(), self.opt.state)
 
 class Model(nn.Module):
-    def __init__(self, config: blocks.Config) -> None:
+    def __init__(self, config: blocks.Config, tokenizer: dict[str, Any] | None = None) -> None:
         super().__init__()
 
-        self.tokenizer = tokenizers.Tokenizer() if config.get('tokenizer') is None else tokenizers.BPE(config['tokenizer'])
-        config['vocab'] = self.tokenizer.size
-
+        self.tokenizer = tokenizers.Tokenizer() if tokenizer is None else tokenizers.BPE(tokenizer)
         self.config = config
+
+        self.aux: blocks.Config = {'vocab': self.tokenizer.size}
 
         validation.key_exists(config['block'], blocks.BLOCKS)
         validation.key_exists(config['loss'], blocks.LOSSES)
 
-        self.encoder = Encoder(config)
-        self.decoder = Decoder(config)
+        self.encoder = Encoder(config, self.aux)
+        self.decoder = Decoder(config, self.aux)
 
-        self.optimizer = Optimizer(config)
+        self.optimizer = Optimizer(config, self.aux)
 
-        self.blocks: list[blocks.Block] = [blocks.BLOCKS[config['block']](config) for _ in range(config['layers'])]
-        self.loss: blocks.Loss = blocks.LOSSES[config['loss']](config)
+        self.blocks: list[blocks.Block] = [blocks.BLOCKS[config['block']](config, self.aux) for _ in range(config['layers'])]
+        self.loss: blocks.Loss = blocks.LOSSES[config['loss']](config, self.aux)
 
         for block in self.blocks:
             validation.instance(block, blocks.Block, 'block')
@@ -110,7 +115,7 @@ class Model(nn.Module):
 
     def sample(self, output: mx.array, key: mx.array | None = None) -> mx.array:
         probs = mx.softmax(output)
-        entropy = -mx.sum(probs * mx.log(probs + 1e-8)) / mx.log(mx.array(float(self.config['vocab'])))
+        entropy = -mx.sum(probs * mx.log(probs + 1e-8)) / mx.log(mx.array(float(self.aux['vocab'])))
 
         temp = mx.maximum(0.1, self.config['temp'] * (1.0 - self.config['temp'] * entropy)).item()
         return mx.random.categorical(output / temp, key = key)

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import pytest
 
 import mlx.core as mx
@@ -30,7 +31,7 @@ def test_model_recurrence(model_init):
 
 def test_model_loss(model_init):
     model: Model = model_init()
-    lossfn: Loss = LOSSES[model.config['loss']](model.config)
+    lossfn: Loss = LOSSES[model.config['loss']](model.config, model.aux)
 
     x = mx.array([0.0, 0.5, 1.0, 1.5])
     output = mx.arange(257) * 0.001

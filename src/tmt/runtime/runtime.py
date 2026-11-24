@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import tmt.model.model as model
 import tmt.model.blocks as blocks
 import tmt.runtime.checkpoint as checkpoint
@@ -136,7 +138,7 @@ class TrainingRun:
     def __init__(
             self,
             path: validation.FilePath, data: validation.FilePath, eval_data: validation.FilePath,
-            config: blocks.Config | None, seed: int, updates: int,
+            config: blocks.Config | None, tokenizer: dict[str, Any] | None, seed: int, updates: int,
             intervals: tuple[int, int, int, int], sampling: tuple[str, int, int],
             resume: bool = False, max_bytes: int = -1, new: bool = False
         ):
@@ -166,7 +168,7 @@ class TrainingRun:
 
             with checkpoint.preserve_seed():
                 checkpoint.seed(0)
-                self.model = model.Model(config)
+                self.model = model.Model(config, tokenizer)
                 self.config = config
 
         # directories
@@ -302,9 +304,10 @@ class TrainingRun:
             data = self.model.tokenizer.encode(data)
 
             self.model.reset()
-            if len(data) == 1: self.consume(data[0])
 
             for index in range(len(data)):
+                self.check_interrupt()
+
                 end = (index == len(data) - 1)
                 components: dict[str, float] = {}
 
@@ -324,7 +327,9 @@ class TrainingRun:
 
                 self.check_intervals()
 
-                if self.completed > self.updates: break
+                if self.completed >= self.updates: break
+                
+            if self.completed >= self.updates: break
 
         self.check_interrupt()
         validation.require(self.completed != start, 'failed to locate valid training targets')        
@@ -443,7 +448,7 @@ def validate_grid(grid: Any, config: blocks.Config) -> None:
         for value in axis:
             if key == 'seed': validation.seed(value, 'sweep grid seed')
             else:
-                candidate = config
+                candidate = dict(config)
                 candidate[key] = value
                 checkpoint.validate_config(candidate)
 
@@ -512,7 +517,7 @@ def sweep_candidate(index: int, seed: int, keys: list[str], values: tuple[Any, .
     overrides = dict(zip(keys, values))
     run_seed = overrides.pop('seed', seed)
 
-    run_config = config
+    run_config = dict(config)
     run_config.update(overrides)
 
     return (index, run_seed, run_config)
@@ -534,7 +539,7 @@ def sweep_run(
 
     model = TrainingRun(
         checkpoint_dir, data.pattern, eval_data.pattern,
-        candidate[2], candidate[1],
+        candidate[2], None, candidate[1],
         updates, intervals, sampling, False, max_bytes
     ).run()
 

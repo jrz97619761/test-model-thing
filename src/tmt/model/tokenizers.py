@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import tmt.util.validation as validation
 
 from typing import Any, Iterable, Sequence

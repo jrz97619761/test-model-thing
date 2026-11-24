@@ -1,21 +1,25 @@
+from __future__ import annotations
+
 import tmt.cli.commands as commands
 import tmt.cli.handlers as handlers
 import tmt.util.validation as validation
 
 import argparse
 import sys
+import json
 
 from typing import Sequence
 
 def version() -> str:
     from importlib.metadata import distribution
+
     dist = distribution('test-model-thing')
+    direct_url = dist.read_text('direct_url.json')
 
-    if dist.origin and hasattr(dist.origin, 'vcs_info'): # python 3.13+
-        commit = dist.origin.vcs_info.commit_id
-    else: commit = None
+    commit = None
+    if direct_url: commit = json.loads(direct_url).get('vcs_info', {}).get('commit_id')
 
-    return f'tmt {dist.version}, commit {commit or 'unknown'}'
+    return f'tmt {dist.version}, commit {commit or "unknown"}'
 
 # cmd manual
 
@@ -98,6 +102,11 @@ def setup() -> argparse.ArgumentParser:
 
     return parser
 
+SILENT = ('help', 'inspect', '--version')
+
+def log_notice(argv: Sequence[str], type: str) -> None:
+    if len(argv) > 0 and argv[0] not in SILENT: print(f'tmt: {type} command \'{argv[0]}\'.')
+
 @commands.wrap_interrupt
 def main(argv: Sequence[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -107,13 +116,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         if route_manual(argv, parser): return
         check_misplaced(argv, parser)
 
-        if len(argv) > 0 and argv[0] != 'help': print(f'tmt: running command \'{argv[0]}\'.')
+        log_notice(argv, 'running')
         
-        args = parser.parse_args()
+        args = parser.parse_args(argv)
         args.handler(args, parser)
 
-        if len(argv) > 0 and argv[0] != 'help': print(f'tmt: finished command \'{argv[0]}\'.')
+        log_notice(argv, 'finished')
 
-    except (validation.ValidationError) as e:
-        print(f'tmt: error: {e}', file = sys.stderr)
+    except (validation.ValidationError, OSError) as e:
+        print(f'tmt: error ({validation.format_type(type(e))}): {e}', file = sys.stderr)
         raise SystemExit(1) from None

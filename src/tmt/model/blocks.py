@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.utils as util
@@ -18,7 +20,7 @@ type Fields = dict[str, mx.array | None]
 type FwdOutput = tuple[mx.array, Fields, Fields]
 type BwdOutput = tuple[GradTree, Fields, Fields]
 
-type ConfigValue = int | float | bool | tuple[ConfigValue, ...] | list[ConfigValue] | dict[str, ConfigValue]
+type ConfigValue = int | float | bool | tuple[ConfigValue, ...]
 type Config = dict[str, ConfigValue]
 
 type BlockSchema = dict[str, tuple[tuple[int, ...], mx.Dtype]]
@@ -26,9 +28,10 @@ type BlockSchema = dict[str, tuple[tuple[int, ...], mx.Dtype]]
 # base classes
 
 class Block(nn.Module):
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, aux: Config) -> None:
         super().__init__()
         self.config = config
+        self.aux = aux
         self.schema = None
 
     # implementable
@@ -119,15 +122,17 @@ class Block(nn.Module):
         self.validate(self.statefields, states)
 
 class Loss:
-    def __init__(self, config: Config) -> None: self.config = config
+    def __init__(self, config: Config, aux: Config) -> None:
+        self.config = config
+        self.aux = aux
 
     def loss(self, fields: Fields, metrics: Fields) -> mx.array: return mx.array(0.0)
 
 # implementations
 
 class TMT0Block(Block):
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
+    def __init__(self, config: Config, aux: Config) -> None:
+        super().__init__(config, aux)
 
         # decay
         halflives = mx.exp(mx.linspace(0.0, math.log(float(config['spread'])), config['dim']))
@@ -137,7 +142,7 @@ class TMT0Block(Block):
         # states and traces
         self.states = mx.zeros((config['dim'],))
         self.decaytrace = mx.zeros((config['dim'],))
-        self.embedtrace = mx.zeros((config['vocab'], config['dim']))
+        self.embedtrace = mx.zeros((aux['vocab'], config['dim']))
 
         self.freezeall()
 
@@ -166,7 +171,7 @@ class TMT0Block(Block):
     def grads(self, output: FwdOutput, grads: GradTree, probegrad: mx.array) -> BwdOutput:
         decay = output[2]['decay']
 
-        c_range = (mx.arange(self.config['vocab']) == output[0])[:, None].astype(mx.float32)
+        c_range = (mx.arange(self.aux['vocab']) == output[0])[:, None].astype(mx.float32)
         decay_embedtrace = self.embedtrace * decay
 
         embedtrace = decay_embedtrace + c_range
@@ -176,7 +181,7 @@ class TMT0Block(Block):
         return grads, {'decaytrace': decaytrace, 'embedtrace': embedtrace}, {'encoder': probegrad * decay_embedtrace}
 
 class CEOnlyLoss(Loss):
-    def __init__(self, config: Config): super().__init__(config)
+    def __init__(self, config: Config, aux: Config): super().__init__(config, aux)
 
     def loss(self, fields: Fields, metrics: Fields) -> mx.array:
         output, target = fields['output'], fields['target']
@@ -187,7 +192,7 @@ class CEOnlyLoss(Loss):
         return metrics['ce']
 
 class TMT0Loss(Loss):
-    def __init__(self, config: Config): super().__init__(config)
+    def __init__(self, config: Config, aux: Config): super().__init__(config, aux)
 
     def loss(self, fields: Fields, metrics: Fields) -> mx.array:
         x, output, target, target_emb = fields['x'], fields['output'], fields['target'], fields['target_emb']

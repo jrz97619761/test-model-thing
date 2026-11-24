@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import tmt.runtime.runtime as runtime
 import tmt.runtime.checkpoint as checkpoint
 import tmt.runtime.benchmark as benchmark
@@ -83,14 +85,15 @@ def handle_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> N
 
     # config loading
 
+    config = tokenizer = None
     if not args.resume:
         config = checkpoint.load_config(args.config or 'model.json')
 
         if args.bpe is not None:
-            config['tokenizer'] = checkpoint.read_json(args.bpe)
-            tokenizers.BPE(tokenizers.BPEConverter.tmt(config['tokenizer']))
+            tokenizer = checkpoint.read_json(args.bpe)
+            tokenizers.BPE(tokenizers.BPEConverter.tmt(tokenizer))
 
-            if not config['tokenizer']['merges']:
+            if not tokenizer['merges']:
                 parser.error(f'{args.bpe} gave no merges, is the tokenizer file empty or invalid?')
 
     # folder handling
@@ -109,7 +112,7 @@ def handle_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> N
     # run
 
     runtime.TrainingRun(
-        checkpoint_path, args.data, args.eval_data, config,
+        checkpoint_path, args.data, args.eval_data, config, tokenizer,
         args.seed, args.updates,
         
         (args.log_interval, args.save_interval, args.eval_interval, args.sample_interval),

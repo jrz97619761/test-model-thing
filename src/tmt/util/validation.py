@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 import operator
 from functools import reduce
@@ -35,18 +37,19 @@ def convert(tp) -> type | UnionType | tuple:
     if origin is not None: return origin
     return tp
 
+def format_type(tp) -> str:
+    return str(tp).replace('|', 'or').replace('<class \'', '').replace('\'>', '')
+
 def instance(obj: Any, tp: Any, name: str) -> None:
     tp = convert(tp)
-
-    string = str(tp).replace('|', 'or').replace('<class \'', '').replace('\'>', '')
-    require(isinstance(obj, tp), f'{name} should be of type {string}')
+    require(isinstance(obj, tp), f'{name} should be of type {format_type(tp)}')
 
 @contextmanager
 def trycatch(errors: type | tuple[type, ...], msg: str, trace: bool = False) -> Generator[None, None, None]:
     try: yield
 
     except errors as e:
-        raise ValidationError(f'({str(type(e)).replace('<class \'', '').replace('\'>', '')}) {msg}') from (e if trace else None)
+        raise ValidationError(f'({format_type(type(e))}) {msg}') from (e if trace else None)
 
 # numbers
 
