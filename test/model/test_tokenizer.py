@@ -43,7 +43,7 @@ def test_token_hf_converter():
     assert BPEConverter.huggingface(source) == [(97, 98), (32, 257)]
 
     source['pre_tokenizer'] = {'type': 'ByteLevel'}
-    with pytest.raises(ValidationError, match = 'extra keys'): BPEConverter.huggingface(source)
+    with pytest.raises(ValidationError, match = 'banned keys'): BPEConverter.huggingface(source)
 
 def test_token_tiktoken_converter():
     rows = [(bytes([i]), i) for i in range(256)] + [(b'ab', 256), (b'aba', 257)]

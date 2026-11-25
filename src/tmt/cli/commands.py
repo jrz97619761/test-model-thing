@@ -107,6 +107,11 @@ TRAIN_BASE: Arguments = {
         'help': 'quoted held-out train glob, one document per file; required'
     },
 
+    '--name': {
+        'default': 'model',
+        'help': 'safetensors file name; default: model'
+    },
+
     '--updates': {
         'type': int,
         'default': 10000,

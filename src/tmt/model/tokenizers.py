@@ -7,6 +7,9 @@ from typing import Any, Iterable, Sequence
 import base64
 import math
 
+type BytePair = Sequence[int, int]
+type Merges = Iterable[BytePair]
+
 class Tokenizer:
     def __init__(self) -> None:
         self.vocab: list[bytes] = [bytes([byte]) for byte in range(256)] + [b'']
@@ -17,10 +20,10 @@ class Tokenizer:
     def encode(self, data: bytes) -> list[int]: return list(data)
     def decode(self, token: int) -> bytes: return self.vocab[token]
 
-type BytePair = Sequence[int, int]
+    def mergelist(self) -> Merges | None: return None
 
 class BPE(Tokenizer):
-    def __init__(self, merges: Iterable[BytePair]) -> None:
+    def __init__(self, merges: Merges) -> None:
         super().__init__()
         self.ranks: dict[BytePair, int] = {}
 
@@ -40,6 +43,8 @@ class BPE(Tokenizer):
             self.vocab.append(self.vocab[pair[0]] + self.vocab[pair[1]])
 
     def encode(self, data: bytes) -> list[int]: return BPE.merge(data, self.ranks)
+
+    def mergelist(self) -> Merges | None: return list(self.ranks)
 
     @staticmethod
     def merge(data: bytes, ranks: dict[BytePair, int]) -> list[int]:
@@ -65,7 +70,7 @@ class BPE(Tokenizer):
 
 class BPEConverter:
     @staticmethod
-    def tmt(config: Any) -> list[BytePair]:
+    def tmt(config: Any) -> Merges:
         validation.instance(config, dict, 'tmt tokenizer bpe')
         validation.key_difference(config, ['merges'], 'tmt tokenizer bpe')
         validation.instance(config['merges'], list, 'tmt tokenizer bpe merges')
@@ -73,9 +78,9 @@ class BPEConverter:
         return config['merges']
 
     @staticmethod
-    def huggingface(config: Any) -> list[BytePair]:
+    def huggingface(config: Any) -> Merges:
         validation.instance(config, dict, 'hf tokenizer')
-        validation.key_difference(config, ['model'], 'hf tokenizer', strict = False)
+        validation.key_difference(config, ['model'], 'hf tokenizer', strict = False, banned = ['normalizer', 'pre_tokenizer', 'added_tokens'])
 
         validation.instance(config.get('model'), dict, 'hf tokenizer model')
         validation.instance(config['model'].get('merges'), list, 'hf tokenizer merges list')
@@ -109,7 +114,7 @@ class BPEConverter:
         return merges
 
     @staticmethod
-    def tiktoken(config: Any) -> list[BytePair]:
+    def tiktoken(config: Any) -> Merges:
         validation.instance(config, str, 'tiktoken rank file')
 
         with validation.trycatch(ValueError, 'invalid tiktoken rank file'):

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tmt.model.model as model
 import tmt.model.blocks as blocks
+import tmt.model.tokenizers as tokenizers
+
 import tmt.runtime.checkpoint as checkpoint
 import tmt.runtime.benchmark as benchmark
 import tmt.util.validation as validation
@@ -139,7 +141,7 @@ class TrainingRun:
     def __init__(
             self,
             path: validation.FilePath, data: validation.FilePath, eval_data: validation.FilePath,
-            config: blocks.Config | None, tokenizer: dict[str, Any] | None, seed: int, updates: int,
+            config: blocks.Config | None, merges: tokenizers.Merges | None, seed: int, updates: int,
             intervals: tuple[int, int, int, int], sampling: tuple[str, int, int],
             resume: bool = False, max_bytes: int = -1, new: bool = False
         ):
@@ -169,15 +171,15 @@ class TrainingRun:
 
             with checkpoint.preserve_seed():
                 checkpoint.seed(self.seed)
-                self.model = model.Model(config, tokenizer)
+                self.model = model.Model(config, merges)
                 self.config = config
 
         # directories
 
         self.checkpoint = Path(path)
-        self.checkpoint.parent.mkdir(parents = True, exist_ok = not new)
+        self.checkpoint.parent.mkdir(parents = True, exist_ok = True)
 
-        self.manifest_dir = self.checkpoint.parent / 'manifest'
+        self.manifest_dir = self.checkpoint.parent / 'manifest' / self.checkpoint.name.removesuffix('.safetensors')
         self.manifest_dir.mkdir(parents = True, exist_ok = True)
 
         self.sample_dir = self.manifest_dir / 'samples' / checkpoint.stamp('file')
@@ -271,7 +273,8 @@ class TrainingRun:
         self.evaluated = self.completed
 
     def save(self) -> None:
-        checkpoint.save(self.checkpoint, self.model, self.config)
+        checkpoint.save(self.checkpoint, self.model, self.config, self.model.tokenizer.mergelist())
+
         checkpoint.write_json(self.manifest_dir / 'manifest.json', run_manifest(
             self.config, self.files, self.eval_files,
             self.seed, self.updates, self.resume,
@@ -421,7 +424,7 @@ def inspect(path: validation.FilePath) -> dict[str, Any]:
         'run': None
     }
 
-    manifest = Path(path).parent / 'manifest' / 'manifest.json'
+    manifest = Path(path).parent / 'manifest' / Path(path).name.removesuffix('.safetensors') / 'manifest.json'
     if manifest.is_file():
         data = checkpoint.read_json(manifest)
         validation.instance(data, dict, 'run manifest')
@@ -524,19 +527,19 @@ def sweep_candidate(index: int, seed: int, keys: list[str], values: tuple[Any, .
     return (index, run_seed, run_config)
 
 def sweep_run(
-    candidate: SweepCandidate, output: Path,
+    candidate: SweepCandidate, output: Path, name: str,
     data: checkpoint.ByteFiles, eval_data: checkpoint.ByteFiles, dev_data: checkpoint.ByteFiles,
 
     updates: int, intervals: tuple[int, int, int, int], sampling: tuple[str, int, int], max_bytes: int
 ) -> SweepExecution:
-    run_path = output / f'run_{candidate[0]:04d}'
+    run_path = output / f'{name}_{candidate[0]:04d}'
     run_path.mkdir(parents = True, exist_ok = True)
 
-    manifest_dir = run_path / 'manifest'
+    manifest_dir = run_path / 'manifest' / f'{name}_{candidate[0]:04d}'
     manifest_dir.mkdir(parents = True, exist_ok = True)
     checkpoint.write_json(manifest_dir / 'model.json', checkpoint.group_config(candidate[2]))
 
-    checkpoint_dir = run_path / 'model.safetensors'
+    checkpoint_dir = run_path / f'{name}_{candidate[0]:04d}.safetensors'
 
     model = TrainingRun(
         checkpoint_dir, data.pattern, eval_data.pattern,
@@ -577,7 +580,7 @@ def sweep(
     data: validation.FilePath, eval_data: validation.FilePath, dev_data: validation.FilePath,
     grid_path: validation.FilePath, config_path: validation.FilePath, output_path: validation.FilePath,
 
-    seed: int, updates: int, intervals: tuple[int, int, int, int], sampling: tuple[str, int, int],
+    name: str, seed: int, updates: int, intervals: tuple[int, int, int, int], sampling: tuple[str, int, int],
     max_bytes: int = -1
 ) -> dict[str, Any]:    
     TrainingRun.validate(seed, updates, intervals, sampling)
@@ -621,7 +624,7 @@ def sweep(
             candidate = sweep_candidate(index, seed, keys, values, config)
 
             run = sweep_run(
-                candidate, output,
+                candidate, output, name,
                 train_files, eval_files, dev_files,
                 updates, intervals, sampling, max_bytes
             )

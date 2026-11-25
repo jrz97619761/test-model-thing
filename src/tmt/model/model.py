@@ -65,10 +65,10 @@ class Optimizer:
     def evaluate(self, model: Model) -> None: mx.eval(model.parameters(), self.opt.state)
 
 class Model(nn.Module):
-    def __init__(self, config: blocks.Config, tokenizer: dict[str, Any] | None = None) -> None:
+    def __init__(self, config: blocks.Config, merges: tokenizers.Merges | None = None) -> None:
         super().__init__()
 
-        self.tokenizer = tokenizers.Tokenizer() if tokenizer is None else tokenizers.BPE(tokenizer)
+        self.tokenizer = tokenizers.Tokenizer() if merges is None else tokenizers.BPE(merges)
         self.config = config
 
         self.aux: blocks.Config = {'vocab': self.tokenizer.size}

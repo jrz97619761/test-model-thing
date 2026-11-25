@@ -87,16 +87,18 @@ def handle_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> N
 
     # config loading
 
-    config = tokenizer = None
+    config = merges = None
     if not args.resume:
         config = checkpoint.load_config(args.config or 'model.json')
 
         if args.bpe is not None:
-            tokenizer = checkpoint.read_json(args.bpe)
-            tokenizers.BPE(tokenizers.BPEConverter.tmt(tokenizer))
+            bpe = checkpoint.read_json(args.bpe)
 
-            if not tokenizer['merges']:
+            if not bpe.get('merges', []):
                 parser.error(f'{args.bpe} gave no merges, is the tokenizer file empty or invalid?')
+
+            merges = bpe['merges'] 
+            tokenizers.BPE(merges)
 
     # folder handling
 
@@ -105,16 +107,16 @@ def handle_train(args: argparse.Namespace, parser: argparse.ArgumentParser) -> N
     if new:
         name = args.run or checkpoint.stamp('file')
         folder = Path('runs') / name
-        validation.require(not folder.exists(), f'run folder {folder} already exists; choose a new run name')
-        checkpoint_path = folder / 'model.safetensors'
+        checkpoint_path = folder / (args.name + '.safetensors')
     else:
         checkpoint_path = args.checkpoint
-        validation.require(args.resume or not Path(checkpoint_path).exists(), f'checkpoint {checkpoint_path} exists; use --resume, or remove it')
+
+    validation.require(args.resume or not Path(checkpoint_path).exists(), f'checkpoint {checkpoint_path} exists; use --resume, or remove it')
 
     # run
 
     runtime.TrainingRun(
-        checkpoint_path, args.data, args.eval_data, config, tokenizer,
+        checkpoint_path, args.data, args.eval_data, config, merges,
         args.seed, args.updates,
         
         (args.log_interval, args.save_interval, args.eval_interval, args.sample_interval),
@@ -154,10 +156,10 @@ def handle_generate(args: argparse.Namespace, _: argparse.ArgumentParser) -> Non
 
 def handle_sweep(args: argparse.Namespace, _: argparse.ArgumentParser) -> None:
     validation.positive(args.max_bytes, 'max bytes')
-    
+
     runtime.sweep(
         args.data, args.eval_data, args.dev_data, args.grid, args.config, args.output,
-        args.seed, args.updates,
+        args.name, args.seed, args.updates,
         
         (args.log_interval, args.save_interval, args.eval_interval, args.sample_interval),
         (args.sample_prompt, args.sample_seed, args.sample_length), args.max_bytes

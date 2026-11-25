@@ -103,12 +103,16 @@ def key_exists(key: Any, map: Any) -> None:
 
     require(key in map, f'unknown key \'{key}\', valid keys: {format_iterable(sorted(map))}')
 
-def key_difference(actual: Any, expected: Any, name: str, strict = True) -> None:
+def key_difference(actual: Any, expected: Any, name: str, strict = True, banned: Any = []) -> None:
     mapping(actual)
     iterable(expected)
+    iterable(banned)
 
     missing = sorted(set(expected) - set(actual))
     require(not missing, f'mapping \'{name}\' has missing keys: {format_iterable(missing)}')
+
+    allowed = sorted(set(actual) - set(banned))
+    require(allowed == sorted(set(actual)), f'mapping \'{name}\' includes some of the following banned keys: {format_iterable(banned)}')
 
     if strict:
         extra = sorted(set(actual) - set(expected))

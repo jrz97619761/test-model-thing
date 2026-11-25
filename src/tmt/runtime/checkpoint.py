@@ -14,6 +14,7 @@ from contextlib import contextmanager
 import tmt.util.validation as validation
 import tmt.model.model as model
 import tmt.model.blocks as blocks
+import tmt.model.tokenizers as tokenizers
 
 # seed
 
@@ -61,6 +62,8 @@ DEFAULT_GRID: dict[str, list[Any]] = {
     'seed': [11, 22]
 }
 
+CONFIG_VERSION = 2
+
 # config handling
 
 def validate_config(config: blocks.Config) -> None:
@@ -81,7 +84,7 @@ def validate_config(config: blocks.Config) -> None:
 
     for value, name in zip((config['temp'], config['lr'][2]), ('temp', 'lr rate')): validation.finite(value, name)
 
-def validate_headers(path: validation.FilePath) -> blocks.Config:
+def validate_headers(path: validation.FilePath) -> tuple[blocks.Config, tokenizers.Merges | None]:
     with validation.trycatch((UnicodeDecodeError, json.JSONDecodeError), 'failed to decode checkpoint header', True):
         # decode envelope
 
@@ -113,18 +116,23 @@ def validate_headers(path: validation.FilePath) -> blocks.Config:
     # validate config
 
     with validation.trycatch(ValueError, 'checkpoint config is invalid json'):
-        raw_config = json.loads(meta.get('tmt'))
+        raw_config: dict[str, Any] = json.loads(meta.get('tmt'))
 
     validation.instance(raw_config, dict, 'checkpoint config')
     validation.instance(raw_config.get('model'), dict, 'checkpoint model config')
 
     validation.instance(raw_config.get('version'), int, 'checkpoint version')
-    validation.require(raw_config.get('version') == 2, 'checkpoint version is not 2')
+    validation.require(raw_config.get('version') == CONFIG_VERSION, 'checkpoint version is not 2')
+
+    validation.instance(raw_config.get('tokenizer'), dict, 'tokenizer metadata')
 
     return {
-        key: tuple(value) if isinstance(value, list) else value
+        key: validation.tuplify(value)
         for key, value in raw_config['model'].items()
-    }
+    }, raw_config['tokenizer'].get('merges')
+
+def dump_headers(config: blocks.Config, merges: tokenizers.Merges | None):
+    return json.dumps({'version': CONFIG_VERSION, 'model': config, 'tokenizer': {'merges': merges}})
 
 def group_config(config: blocks.Config) -> dict[str, Any]:
     validate_config(config)
@@ -206,11 +214,11 @@ def unflatten(tensors: dict[str, Any], key: str) -> Any:
 
 # save load
 
-def save(path: validation.FilePath, m: model.Model, config: blocks.Config):
+def save(path: validation.FilePath, m: model.Model, config: blocks.Config, merges: tokenizers.Merges | None):
     import mlx.core as mx
 
     validate_config(config)
-    meta = json.dumps({'version': 2, 'model': config})
+    meta = dump_headers(config, merges)
 
     m.optimizer.opt.init(m.trainable_parameters())
     parameters = flatten(m.parameters(), 'm')
@@ -239,12 +247,12 @@ def save(path: validation.FilePath, m: model.Model, config: blocks.Config):
 def load(path: validation.FilePath) -> tuple[model.Model, blocks.Config]:
     import mlx.core as mx
 
-    config = validate_headers(path)
+    config, merges = validate_headers(path)
     validate_config(config)
 
     with preserve_seed():
         seed(0)
-        m = model.Model(config)
+        m = model.Model(config, merges)
         m.optimizer.opt.init(m.trainable_parameters())
 
         expected = flatten(m.parameters(), 'm')

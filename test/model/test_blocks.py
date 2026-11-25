@@ -311,7 +311,7 @@ def test_block_checkpoint(block, tmp_path, model_init, model_snapshot):
     # load and save
     
     path = tmp_path / 'candidate.safetensors'
-    save(path, model, settings)
+    save(path, model, settings, model.tokenizer.mergelist())
     loaded, resolved = load(path)
 
     # check
