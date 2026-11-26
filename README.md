@@ -1,6 +1,6 @@
 # Test-Model-Thing (TMT)
 
-_Expect a new YouTube video before the end of November!_
+[YouTube Video (Nov '26)](https://youtu.be/QdUGeTN_ouM)
 
 [Old YouTube Video (Sep '26)](https://youtu.be/9UERVVwpNew)
 
