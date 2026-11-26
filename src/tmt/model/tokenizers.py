@@ -5,7 +5,7 @@ import tmt.util.validation as validation
 from typing import Any, Iterable, Sequence
 
 import base64
-import math
+import heapq
 
 type BytePair = Sequence[int, int]
 type Merges = Iterable[BytePair]
@@ -48,25 +48,36 @@ class BPE(Tokenizer):
 
     @staticmethod
     def merge(data: bytes, ranks: dict[BytePair, int]) -> list[int]:
+        # heap merge contributed by reyvvon
+            
         tokens = list(data)
-        while len(tokens) > 1:
-            pair = min(zip(tokens, tokens[1:]), key = lambda item: ranks.get(item, math.inf))
-            if pair not in ranks: break
+        count = len(tokens)
 
-            merged, index = [], 0
+        following = list(range(1, count)) + [-1]
+        previous = list(range(-1, count - 1))
+        alive = [True] * count
 
-            while index < len(tokens):
-                if tuple(tokens[index : index + 2]) == pair:
-                    merged.append(ranks[pair])
-                    index += 2
+        heap = [(ranks[pair], index) for index, pair in enumerate(zip(tokens, tokens[1:])) if pair in ranks]
+        heapq.heapify(heap)
 
-                else:
-                    merged.append(tokens[index])
-                    index += 1
+        while heap:
+            rank, index = heapq.heappop(heap)
+            right = following[index]
 
-            tokens = merged
+            if not alive[index] or right == -1 or ranks.get((tokens[index], tokens[right])) != rank: continue
 
-        return tokens
+            tokens[index] = rank
+            alive[right] = False
+
+            after = following[right]
+            following[index] = after
+            if after != -1: previous[after] = index
+
+            before = previous[index]
+            if before != -1 and (tokens[before], rank) in ranks: heapq.heappush(heap, (ranks[tokens[before], rank], before))
+            if after != -1 and (rank, tokens[after]) in ranks: heapq.heappush(heap, (ranks[rank, tokens[after]], index))
+
+        return [token for token, kept in zip(tokens, alive) if kept]
 
 class BPEConverter:
     @staticmethod
