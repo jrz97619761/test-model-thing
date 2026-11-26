@@ -6,7 +6,7 @@
 
 ## Overview
 
-TMT is a work-in-progress MLX-based framework and command-line tool for experimenting with alternative language model architectures. It is in very, very early stages, so expect lots of missing, but roadmapped features and unimplemented ideas. I have a lot of plans for this, so stay tuned!
+TMT is a work-in-progress MLX-based framework and command-line tool for experimenting with alternative language model architectures. Decentralized training is planned. It is in very, very early stages, so expect lots of missing, but roadmapped features and unimplemented ideas. I have a lot of plans for this, so stay tuned!
 
 **TMT will forever be permissively open source (including all training code and data), because I firmly believe in the importance of open source in a world where frontier AIs are either closed or only open weight (with no code attached). Open source for the win!**
 
