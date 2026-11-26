@@ -6,7 +6,7 @@
 
 ## Overview
 
-TMT is a work-in-progress MLX-based framework and command-line tool for experimenting with alternative language model architectures. Decentralized training is planned. It is in very, very early stages, so expect lots of missing, but roadmapped features and unimplemented ideas. I have a lot of plans for this, so stay tuned!
+TMT is a work-in-progress MLX-based framework and command-line tool for experimenting with alternative language model architectures and distributed/decentralized training. It is in very, very early stages, so expect lots of missing, but roadmapped features and unimplemented ideas. I have a lot of plans for this, so stay tuned!
 
 **TMT will forever be permissively open source (including all training code and data), because I firmly believe in the importance of open source in a world where frontier AIs are either closed or only open weight (with no code attached). Open source for the win!**
 
@@ -33,7 +33,7 @@ As per the MIT License, please feel free to fork the project, try new ideas, and
 
 * On-device parallel/batched training.
 
-* Long term: RL and decentralized training. To really scale up the TMT effort internet-based decentralized training is the only way other than data centers, and the latter costs $$$. My vision is for ~10^5 to 10^7 consumer GPUs connected through the internet, training large scale models built off recurrent architectures.
+* RL and decentralized training. To really scale up the TMT effort internet-based decentralized training is the only way other than data centers, and the latter costs $$$. My vision is for ~10^5 to 10^7 consumer GPUs connected through the internet, training large scale models built off recurrent architectures.
 
 * More things are planned, both short and long term, so stay tuned :)
 
