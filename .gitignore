@@ -1,9 +1,29 @@
+# cache
+/build/
+/dist/
+
 /.venv/
-/typings/
+
+*.whl
+*.egg-info
+
+.pytest_cache/
+__pycache__/
+
+# dataset
 /wikipedia_clean/
 /CoLA/
 *.xml.bz2
-/__pycache__/
-*.pipe
+
+# macOS
 *.DS_Store
+
+# runs
 *.safetensors
+*.bin
+
+runs/
+data/
+
+wkspc/
+workspace/

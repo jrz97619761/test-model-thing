@@ -1,69 +1,109 @@
 # Test-Model-Thing (TMT)
 
-[YouTube Video](https://youtu.be/9UERVVwpNew)
+[YouTube Video (Nov '26)](https://youtu.be/QdUGeTN_ouM)
 
-This is a small proof-of-concept language model (not an LLM) that aims to incorporate the following (and some smaller features as well):
-* Latent-space prediction
-* Internal state + recurrent trace units (RTUs)
-* Byte input/output
-* Continuous data streaming
-* Test-time training
+[Old YouTube Video (Sep '26)](https://youtu.be/9UERVVwpNew)
 
-It is not a finished work.
+## Overview
 
-The model is built with MLX, so it should run fine on all Apple Silicon devices. MLX on Linux has been tested by community members and it should work fine as well. On Windows, there are a few unofficial work-in-progress Pytorch ports but they aren't 1:1 compatible yet. I have managed to get the model running on WSL however, and it does train.
+TMT is a work-in-progress MLX-based framework and command-line tool for experimenting with alternative language model architectures and distributed/decentralized training. It is in very, very early stages, so expect lots of missing, but roadmapped features and unimplemented ideas. I have a lot of plans for this, so stay tuned!
 
-Being a proof of concept I have only trained a 4.5-million parameter model (keep in mind, GPT-1 was ~117m) for about 12 hours, but there are promising results. The model tends to misspell characters (since it outputs byte-by-byte, rather than token-by-token) but it is able to close quotes/brackets and such. Given further training and scaling up the model more interesting results could occur. I'm also using a very small dataset, so there is a lot more that can be fed into the model.
+**TMT will forever be permissively open source (including all training code and data), because I firmly believe in the importance of open source in a world where frontier AIs are either closed or only open weight (with no code attached). Open source for the win!**
 
-This model architecture was designed between July and August 2026 by me (a solo high school dev) and some Gemini (only pair programming, no agents). I wrote about a dozen prototypes before finalizing on this architecture. I write READMEs myself without AI.
+TMT runs on macOS (any Apple Silicon) and Linux and WSL (any CUDA-supported GPU, or CPU). AMD support is not available currently, as MLX doesn't natively support it, but feel free to port it yourself. Installation instructions in a below section.
 
-Feel free to fork the training and benchmark code (everything is under MIT). I really encourage you to try things out and submit issues and pull requests. If you have compute (e.g. you are a lab or just have GPUs lying around), feel free to train larger models for longer periods of time as well, with credit. I really appreciate contributions to the project.
+As per the MIT License, please feel free to fork the project, try new ideas, and submit PRs. If you're building your own projects with TMT as a base, just make sure to credit appropriately. Contributions, feedback, and constructive criticism are very much welcome!
 
-## Model output
+**Currently included:**
 
-For reproduction purposes, the dataset I trained my model on is ```simplewiki-20260801-pages-articles.xml.bz2```, from the Wikipedia dumps. The 4.5m model has ```dim = 512``` and ```layers = 16```.
+* A small proof-of-concept RNN block, inspired by recurrent trace units (RTUs) in place of backpropagation through time (BPTT)
 
-Below is ```--frozen``` mode output after training a model for 5 minutes (you could train it for much longer, feel free to send in the results as a GitHub issue).
+* A base framework for implementing various layers/blocks and loss functions in code, that can directly plug into the default encoder and decoder. (Documentation WIP.)
 
-<img width="1127" height="634" alt="Screenshot 2026-09-19 at 4 53 44 PM" src="https://github.com/user-attachments/assets/ca1553de-0248-4f6d-a67d-2f6e30938d9e" />
+* Byte pair encoding support, although you will need to import a BPE file from either HF or tiktoken yourself.
 
-Also below is some results from CoLA after training a model for ~30 minutes. GPT-1, as a comparison point, scored 45.4, so there is still some distance to go.
+* CoLA (Corpus of Linguistic Acceptability) and bit-per-byte benchmarks. CoLA is a manual download now but will hopefully be automatic fetch soon.
 
-<img width="449" height="273" alt="Screenshot 2026-09-19 at 4 53 25 PM" src="https://github.com/user-attachments/assets/66cd054d-61c0-442a-a0bd-24352dac3f58" />
+* A command-line tool for training and benchmarking language models using these alternative designs, alongside sweeping through various combinations of sizes and blocks for comparison and experimentation.
 
+**Planned:**
+* A catalog of various recurrent blocks, such as Mamba, GDN, xLSTM, Titans/TTT, etc, in addition to lots of experimentation with custom designs.
 
-## Training your own model
+* A catalog of various benchmarks.
 
-Model weights (in ```.safetensors```) are not provided because GitHub doesn't like very large files. But, you can train your own model simply by initializing a ```venv``` and installing dependencies with ```pip install mlx``` on Mac or ```pip install mlx[cuda]``` on Linux with GPU or ```pip install mlx[cpu]``` on Linux with CPU. Then run ```main.py```.
+* On-device parallel/batched training.
+
+* RL and decentralized training. To really scale up the TMT effort internet-based decentralized training is the only way other than data centers, and the latter costs $$$. My vision is for ~10^5 to 10^7 consumer GPUs connected through the internet, training large scale models built off recurrent architectures.
+
+* More things are planned, both short and long term, so stay tuned :)
+
+_While I personally don't use LLM agents (due to $$$ requirements), LLM contributions are 100% welcome. I appreciate any suggestions for improvement! Note that, I also write documentation, like this README, by hand. The AGENTS.md in the repo is solely for other contributors._
+
+## Installation
+
+### TMT module (macOS)
+
+First clone the repo via git. Python 3.12 to 3.14 are supported.
+
+Then, run the following commands (you should see the version of TMT installed):
 
 ```bash
-python main.py <path> train
-python main.py <path> chat
+python3 -m venv .venv
+source .venv/bin/activate
 
-# only use crossentropy loss
-python main.py <path> chat --ce-only
-
-# does not save to disk
-python main.py <path> chat --no-save
-
-# does not modify weights
-python main.py <path> chat --frozen
-
-# does not save to disk or modify weights
-python main.py <path> chat --no-save --frozen
-
-# benchmark with CoLA
-python benchmark.py <path> <epochs> <slice>
+pip install .
+tmt --version
 ```
 
-You will have to configure your own dataset to run dataset mode, but you should be able to run chat mode without modifying anything if you have weights already.
+To install the dependencies for running unit tests:
+```bash
+pip install -e '.[test]'
+```
 
-Once it begins training, you can safely ^C the program and it will save weights. It will also periodically save weights every so often. The saved weights include the internal memory so the model will remember that the next time it runs. You can launch into chat mode and the memory should carry on from whatever it was learning in training.
+You can also run the CLI with
+```bash
+python3 -m tmt
+```
 
-## A graphical view (partially outdated)
+### TMT module (Linux/WSL)
+Instructions WIP. Main difference is that the installation of MLX is slightly more complicated, especially for CUDA.
 
-_I'm probably going to redo this in Manim or similar software sometime soon. Expect this part to change significantly soon_
+### Workspace initialiation
 
-Below is an approximate flow chart of the model architecture, made in Apple's Freeform app (excluding the wrapper for dataset cleaning and input/output handling) for reference. Note that the arrow connecting the target latent to the CE loss should instead be the target byte to the CE loss.
+Once TMT is installed, you can initialize a TMT workspace by running:
+```bash
+mkdir workspace
+cd workspace
 
-<img width="1653" height="1161" alt="JEPA thing" src="https://github.com/user-attachments/assets/2d3a34ff-ba6a-44b8-b361-6c73da9216c0" />
+tmt init
+```
+
+Some example TMT commands below:
+```bash
+tmt train --seed 325 --run run
+tmt train runs/run/model.safetensors --seed 325 --resume
+
+tmt generate runs/run/model.safetensors sample.bin "The " --seed 325
+
+tmt evaluate runs/run/model.safetensors eval.json
+
+tmt benchmark runs/run/model.safetensors benchmark.json --seed 325
+
+tmt sweep grid.json sweep.json --seed 325
+```
+
+## Contributing
+
+There aren't really that many rules to contributing here! Just be nice, abide by the GitHub community guidelines, and don't go _too_ off topic. I try to be as welcoming as possible, in the spirit of open source.
+
+I have opened GitHub discussions for this repo so go discuss ideas, share cool results, ask questions, etc there. You can also open an issue or PR if you want to contribute directly! As mentioned previously, AI contributions are welcome. Thank you :)
+
+## Side note about me and my vision
+
+The original project, a miniature proof-of-concept RNN implementation, was something I (a high school dev) worked on throughout July and August of 2026. Given I had barely dabbled in ML prior to that I spent what was effectively 1.5 months trying ideas, making prototypes, and failing. _(I have been very interested in programming for the past decade or so though, so I do kind of have a head start.)_ Throughout that time, and since, I learned a lot about machine learning, however, and I still have a lot to learn (everyone does lol). I'm excited to keep going though! TMT will continue to grow just as I continue to learn.
+
+When I first started to work on TMT I had a core vision (and still do): I want to create a completely open source continual learning language model framework with training 100% through decentralized means, as a replacement for closed source or open weight (but not open source code) LLM training and inference stacks.
+
+Frontier companies are scaling their LLMs rapidly without giving us a single bit of their code, while ignoring alternative architectures and spending all their financial capital on data centers (with not enough work on algorithmic improvements)! All while they fearmonger about the technology to induce more regulation and direct time towards "safety" instead of continual learning. At the same time, experimental ideas (like recurrent models) aren't being scaled up enough to prove that they work, because people just don't have access to the compute that the labs have.
+
+I wanted to change that (and, by extension, the general trajectory of the AI industry), which is why TMT exists, to hopefully allow rapid experimentation and decentralized scaling as soon as the required features are implemented. This would be worked on not just by humans, but also by LLMs that can test new, open source ideas through TMT 24/7. I think the vision is within reach, but getting there will take time and contributions from all of you. Thanks for helping :)
