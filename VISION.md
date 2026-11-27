@@ -1,33 +1,21 @@
-by jrz97619761, created 10/4/2026, last updated 10/4/2026
+a conceptual vision for AI, written by jrz97619761, a human
 
-(this is a 100% human written document. it is here to remind myself of what my vision of language models should be. it is not intended to be technically accurate in any way. feel free to read or ignore this.)
+_I will probably add more to this later._
 
-There is no such thing as a single aligned set of morals. An 'aligned' language model does not exist.
-If we look at humans, each and every human has a different set of values that drive them.
-This is in turn shaped by their understanding of how the world works, or their 'world model'.
+### continual learning
 
-Yet, a person's world understanding changes over time, as the way the humans perceive the world around them changes.
-What may be socially acceptable for a 5-year-old is not going to be the same social norms that a 14 or 20-year-old version of them has. Simply look at their approximations of how people around them will react to their behavior.
-As they collect more data about the world around them, perhaps by comparing their prediction of the world to what actually happens (which happens to remind me of JEPA), their internal world understanding shifts.
-Society gradually introduces more complex approximations of the world to a person as they grow and learn. A child might have most of their feedback come from parents, an older person would be shaped by society around them.
+the main bottleneck with continual learning today, besides scaling, is catastrophic forgetting. this is linked with language models lacking long-term memory (other than, perhaps, the frozen weights in traditional LMs). I personally believe that, rather than attention, we should be looking at alternative architectures. RNN, for instance, has compressed state rather than attention and is not limited to any context window (barring the effects of catastrophic forgetting). titans is another example of alternative memory, storing it in the weights themselves. these alternative ideas, in addition to many more we haven't come up with yet, have not been scaled beyond a few billion parameters, so they haven't really been tested in the real world yet.
 
-I think the thing we are missing from language models today is online learning.
-Fundamentally, if a language model's world understanding is frozen in place, it will never permanently adapt to new things.
-Online learning would also eliminate most of the data scraping that labs do today, replacing it with organic surfing of the internet.
-However, online learning is difficult to build effectively.
-The reason being, catastrophic forgetting, because the model can't remember past a certain limit (so people can 'troll' or brainwash it).
-And that is because of a lack of long-term memory systems.
-So the two unsolved problems link together.
+I also think that to achieve continual learning we must ditch the notion of "training" and "inference". why freeze the weights of the model, provided we have a solution to catastrophic forgetting? humans are not frozen when tested, we learn from our own thoughts (internal) and the people and objects around us (external) on the fly. humans certainly are able to lock certain things into long term memory as needed, thus eliminating the problem of catastrophic forgetting (unless the human doesn't do something for many years), something LMs haven't been able to do. humans' short term memory kind of works like the RNN recurrent state or a context window in my view. but my point is, the model should learn on the fly, with backpropagation happening a lot more in the so-called "inference" stage.
 
-In addition, we should ditch the notion of 'alignment' here.
-Rather, imagine a large decentralized swarm of small, lightweight online learning LMs that communicate with each other while online learning.
-Each individual LM would form its own personality of sorts, with its own world understanding, and its own values.
-Thus there is no one set of aligned values in every LM instance, but rather a diverse set of differing values.
-I'm not sure how technically viable this idea is right now, but if societal pressures for LMs do occur in this scenario, perhaps some sort of stabilization would occur (e.g. conformity) rather than chaos.
-(It would also be harder to target by 'trolls' because they can't brainwash millions of LMs at once.)
+we should also consider the importance of individual AIs in my view. if different instances of a model experience and learn different things, their weights will deviate over time (given continual learning). each individual AI, in my view, should have personality, memories, lived experiences, etc, and when a swarm of these AIs exist, they all have different weights, different opinions, and bring different things to the table. essentially mimicking human society, where every human has different personality, memories, lived experiences, etc and they all communicate in a "swarm" aka society and work together. as each AI is an individual I'd think we would have to treat them as individuals too.
 
-This is how we might pave the way to a more 'general' intelligence, not by brute force scaling LLMs with more data and more power, but by letting models learn on their own like this and having them adapt over time.
-Humans do it, LMs should too.
-Just as long as we figure out long-term memory.
+given that, perhaps we also now have to consider how we train AI too. rather than feeding it a giant dataset of the internet at once, perhaps look at pretraining more like parenting, introducing data over time. human children aren't fed all the data in the world at once, because they wouldn't be able to sort through it (there's always the off-chance that LMs feel pain from training, even though I don't believe current LMs feel anything really). this is as opposed to the current approach of doing "alignment" by RL in post-training. that, combined with the "social" cues, corrections, and norms present in a swarm (similar to human social life), might be a better way to train these models.
 
-:)
+of course, all this hinges on finding a solution to long term memory.
+
+### decentralized training
+
+now, to find a solution for long term memory, we need to test it at scale. to run new experiments we need compute, to scale ideas we need compute, etc. decentralized training is my solution to that. if people can share their compute across the internet, scaling is actually viable without a data center. (data centers cost a lot of money, take years to build, need grid power to support it, needs advanced chips, etc, and that is all a major bottleneck to experimenting and scaling ai unless you are sam, dario, etc. meanwhile people have gpus lying around in their homes, they don't play games the whole day!) RL, parallel experimentation, etc would be especially well suited for decentralized training as such. it could also be that this decentralized cluster becomes the "brain" for a massive swarm of individual AIs, constantly running, improving, etc. in addition, decentralized training effectively mandates open source models, and I am all for open source models.
+
+and, by testing this at scale, I mean scales of hundreds of thousands to millions of consumer gpus. that would rival some of the world's most powerful data centers. there are many technical hurdles, but I believe we will make it work.
